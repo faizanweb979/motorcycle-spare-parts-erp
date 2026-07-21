@@ -20,7 +20,7 @@ async function startServer() {
   app.post("/api/ai/chat", async (req, res) => {
     const { prompt, chatHistory, businessContext } = req.body;
 
-    const groqApiKey = process.env.GROQ_API_KEY || "sk_7z92ioDdMoY8KH8nTT8RWGdyb3FYIuiDQpCUrS9H7m14HbTymTeL";
+    const groqApiKey = process.env.GROQ_API_KEY;
     let groqErrorMsg = "";
     let useGroqSuccess = false;
     let responseText = "";
