@@ -1,0 +1,254 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Basic helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Type and structure validations (The "Anti-Update-Gap")
+    function isValidPart(data) {
+      return data.partNumber is string && data.partNumber.size() <= 100 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.brand is string && data.brand.size() <= 100 &&
+             data.purchasePrice is number && data.purchasePrice >= 0 &&
+             data.retailPrice is number && data.retailPrice >= 0 &&
+             data.stock is number &&
+             data.minStock is number && data.minStock >= 0;
+    }
+
+    function isValidCustomer(data) {
+      return data.name is string && data.name.size() <= 100 &&
+             data.phone is string && data.phone.size() <= 30 &&
+             data.balance is number &&
+             (!("advance" in data) || data.advance is number);
+    }
+
+    function isValidSupplier(data) {
+      return data.name is string && data.name.size() <= 100 &&
+             data.phone is string && data.phone.size() <= 30 &&
+             data.balance is number &&
+             (!("advance" in data) || data.advance is number);
+    }
+
+    function isValidSale(data) {
+      return data.invoiceNumber is string && data.invoiceNumber.size() <= 100 &&
+             data.customerId is string && data.customerId.size() <= 128 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.paidAmount is number && data.paidAmount >= 0 &&
+             data.balanceAmount is number &&
+             data.status is string && data.status.size() <= 50 &&
+             data.items is list;
+    }
+
+    function isValidPurchase(data) {
+      return data.invoiceNumber is string && data.invoiceNumber.size() <= 100 &&
+             data.supplierId is string && data.supplierId.size() <= 128 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.paidAmount is number && data.paidAmount >= 0 &&
+             data.balanceAmount is number &&
+             data.status is string && data.status.size() <= 50 &&
+             data.items is list;
+    }
+
+    function isValidAdjustment(data) {
+      return data.partId is string && data.partId.size() <= 128 &&
+             data.type is string && data.type.size() <= 50 &&
+             data.quantity is number;
+    }
+
+    function isValidAuditLog(data) {
+      return data.userEmail is string && data.userEmail.size() <= 150 &&
+             data.action is string && data.action.size() <= 100 &&
+             data.details is string && data.details.size() <= 1000;
+    }
+
+    function isValidPayment(data) {
+      return data.voucherNumber is string && data.voucherNumber.size() <= 100 &&
+             data.date is string &&
+             data.entityType is string && (data.entityType == "customer" || data.entityType == "supplier") &&
+             data.entityId is string && data.entityId.size() <= 128 &&
+             data.entityName is string && data.entityName.size() <= 200 &&
+             data.amount is number && data.amount >= 0 &&
+             data.paymentMethod is string && data.paymentMethod.size() <= 50 &&
+             data.recordedBy is string && data.recordedBy.size() <= 150 &&
+             data.createdAt is string &&
+             (!("referenceNumber" in data) || (data.referenceNumber is string && data.referenceNumber.size() <= 100)) &&
+             (!("remarks" in data) || (data.remarks is string && data.remarks.size() <= 1000));
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.entityId is string && data.entityId.size() <= 128 &&
+             data.entityType is string && (data.entityType == "customer" || data.entityType == "supplier") &&
+             data.date is string &&
+             data.transactionType is string && data.transactionType.size() <= 50 &&
+             data.referenceId is string && data.referenceId.size() <= 128 &&
+             data.referenceNumber is string && data.referenceNumber.size() <= 100 &&
+             data.description is string && data.description.size() <= 1000 &&
+             data.debit is number && data.debit >= 0 &&
+             data.credit is number && data.credit >= 0 &&
+             data.createdAt is string;
+    }
+
+    function isValidSettings(data) {
+      return data.shopName is string && data.shopName.size() <= 200 &&
+             data.phone is string && data.phone.size() <= 100 &&
+             data.address is string && data.address.size() <= 500 &&
+             data.currency is string && data.currency.size() <= 10 &&
+             data.footerMessage is string && data.footerMessage.size() <= 1000 &&
+             (!("startingCash" in data) || data.startingCash is number) &&
+             (!("startingBank" in data) || data.startingBank is number);
+    }
+
+    function isValidExpense(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.date is string &&
+             data.category is string && (
+               data.category == "Rent" ||
+               data.category == "Electricity" ||
+               data.category == "Salaries" ||
+               data.category == "Transport" ||
+               data.category == "Internet" ||
+               data.category == "Office Expenses" ||
+               data.category == "Maintenance" ||
+               data.category == "Miscellaneous"
+             ) &&
+             data.description is string && data.description.size() <= 1000 &&
+             data.amount is number && data.amount >= 0 &&
+             data.paymentMethod is string && data.paymentMethod.size() <= 50 &&
+             data.createdAt is string;
+    }
+
+    function isValidPartner(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.contact is string && data.contact.size() <= 100 &&
+             data.investment is number && data.investment >= 0 &&
+             data.ownershipPercentage is number && data.ownershipPercentage >= 0 && data.ownershipPercentage <= 100 &&
+             data.joiningDate is string &&
+             data.status is string && (data.status == "Active" || data.status == "Inactive") &&
+             data.createdAt is string;
+    }
+
+    function isValidDrawing(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.partnerId is string && data.partnerId.size() <= 128 &&
+             data.partnerName is string && data.partnerName.size() <= 200 &&
+             data.date is string &&
+             data.amount is number && data.amount >= 0 &&
+             data.reason is string && data.reason.size() <= 500 &&
+             data.createdAt is string;
+    }
+
+    // Collections
+    match /parts/{partId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(partId) && isValidPart(incoming());
+      allow update: if isEmailVerified() && isValidId(partId) && isValidPart(incoming());
+      allow delete: if isEmailVerified() && isValidId(partId);
+    }
+
+    match /customers/{customerId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(customerId) && isValidCustomer(incoming());
+      allow update: if isEmailVerified() && isValidId(customerId) && isValidCustomer(incoming());
+      allow delete: if isEmailVerified() && isValidId(customerId);
+    }
+
+    match /suppliers/{supplierId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(supplierId) && isValidSupplier(incoming());
+      allow update: if isEmailVerified() && isValidId(supplierId) && isValidSupplier(incoming());
+      allow delete: if isEmailVerified() && isValidId(supplierId);
+    }
+
+    match /sales/{saleId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(saleId) && isValidSale(incoming());
+      allow update: if isEmailVerified() && isValidId(saleId) && isValidSale(incoming());
+      allow delete: if isEmailVerified() && isValidId(saleId);
+    }
+
+    match /purchases/{purchaseId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(purchaseId) && isValidPurchase(incoming());
+      allow update: if isEmailVerified() && isValidId(purchaseId) && isValidPurchase(incoming());
+      allow delete: if isEmailVerified() && isValidId(purchaseId);
+    }
+
+    match /adjustments/{adjustmentId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(adjustmentId) && isValidAdjustment(incoming());
+      allow update: if isEmailVerified() && isValidId(adjustmentId) && isValidAdjustment(incoming());
+      allow delete: if isEmailVerified() && isValidId(adjustmentId);
+    }
+
+    match /audit_logs/{logId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(logId) && isValidAuditLog(incoming());
+      allow update, delete: if isEmailVerified() && isValidId(logId);
+    }
+
+    match /payments/{paymentId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(paymentId) && isValidPayment(incoming());
+      allow update: if isEmailVerified() && isValidId(paymentId) && isValidPayment(incoming());
+      allow delete: if isEmailVerified() && isValidId(paymentId);
+    }
+
+    match /ledger_entries/{entryId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(entryId) && isValidLedgerEntry(incoming());
+      allow update: if isEmailVerified() && isValidId(entryId) && isValidLedgerEntry(incoming());
+      allow delete: if isEmailVerified() && isValidId(entryId);
+    }
+
+    match /settings/{settingsId} {
+      allow read: if isEmailVerified();
+      allow create, update: if isEmailVerified() && isValidId(settingsId) && isValidSettings(incoming());
+      allow delete: if false;
+    }
+
+    match /expenses/{expenseId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(expenseId) && isValidExpense(incoming());
+      allow update: if isEmailVerified() && isValidId(expenseId) && isValidExpense(incoming());
+      allow delete: if isEmailVerified() && isValidId(expenseId);
+    }
+
+    match /partners/{partnerId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(partnerId) && isValidPartner(incoming());
+      allow update: if isEmailVerified() && isValidId(partnerId) && isValidPartner(incoming());
+      allow delete: if isEmailVerified() && isValidId(partnerId);
+    }
+
+    match /drawings/{drawingId} {
+      allow read, list: if isEmailVerified();
+      allow create: if isEmailVerified() && isValidId(drawingId) && isValidDrawing(incoming());
+      allow update: if isEmailVerified() && isValidId(drawingId) && isValidDrawing(incoming());
+      allow delete: if isEmailVerified() && isValidId(drawingId);
+    }
+  }
+}

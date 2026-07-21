@@ -1,0 +1,282 @@
+{
+  "entities": {
+    "part": {
+      "title": "Part",
+      "description": "Motorcycle spare part detail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "partNumber": { "type": "string" },
+        "name": { "type": "string" },
+        "brand": { "type": "string" },
+        "category": { "type": "string" },
+        "modelCompatibility": { "type": "string" },
+        "location": { "type": "string" },
+        "purchasePrice": { "type": "number" },
+        "retailPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "minStock": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["partNumber", "name", "brand", "purchasePrice", "retailPrice", "stock", "minStock"]
+    },
+    "customer": {
+      "title": "Customer",
+      "description": "Customer and ledger balance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "shopName": { "type": "string" },
+        "balance": { "type": "number" },
+        "advance": { "type": "number" },
+        "lastPaymentDate": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "phone", "balance"]
+    },
+    "supplier": {
+      "title": "Supplier",
+      "description": "Supplier and ledger balance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "balance": { "type": "number" },
+        "advance": { "type": "number" },
+        "lastPaymentDate": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "phone", "balance"]
+    },
+    "sale": {
+      "title": "Sale",
+      "description": "POS and credit sales details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "totalAmount": { "type": "number" },
+        "discount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "balanceAmount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "status": { "type": "string" },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["invoiceNumber", "customerId", "totalAmount", "paidAmount", "balanceAmount", "status", "items"]
+    },
+    "purchase": {
+      "title": "Purchase",
+      "description": "Purchase items and credit ledger",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "totalAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "balanceAmount": { "type": "number" },
+        "status": { "type": "string" },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["invoiceNumber", "supplierId", "totalAmount", "paidAmount", "balanceAmount", "status", "items"]
+    },
+    "adjustment": {
+      "title": "Adjustment",
+      "description": "Stock adjustment and transaction records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "partId": { "type": "string" },
+        "partName": { "type": "string" },
+        "type": { "type": "string" },
+        "quantity": { "type": "number" },
+        "price": { "type": "number" },
+        "referenceId": { "type": "string" },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["partId", "type", "quantity", "createdAt"]
+    },
+    "audit_log": {
+      "title": "Audit Log",
+      "description": "Record of user activity in the ERP",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userEmail", "action", "details", "createdAt"]
+    },
+    "payment": {
+      "title": "Payment",
+      "description": "Khata and Cash payment vouchers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "voucherNumber": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "entityType": { "type": "string", "enum": ["customer", "supplier"] },
+        "entityId": { "type": "string" },
+        "entityName": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "bank", "jazzcash", "easypaisa", "cheque", "other"] },
+        "referenceNumber": { "type": "string" },
+        "remarks": { "type": "string" },
+        "recordedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["voucherNumber", "date", "entityType", "entityId", "entityName", "amount", "paymentMethod", "recordedBy", "createdAt"]
+    },
+    "ledger_entry": {
+      "title": "Ledger Entry",
+      "description": "Double entry ledger logs for customer and supplier khata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "entityId": { "type": "string" },
+        "entityType": { "type": "string", "enum": ["customer", "supplier"] },
+        "date": { "type": "string", "format": "date-time" },
+        "transactionType": { "type": "string", "enum": ["sale", "purchase", "payment_received", "payment_sent", "sales_return", "purchase_return", "starting_balance"] },
+        "referenceId": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "description": { "type": "string" },
+        "debit": { "type": "number" },
+        "credit": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["entityId", "entityType", "date", "transactionType", "referenceId", "referenceNumber", "description", "debit", "credit", "createdAt"]
+    },
+    "settings": {
+      "title": "Shop Settings",
+      "description": "Configurable details of the motorcycle repair shop",
+      "type": "object",
+      "properties": {
+        "shopName": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "currency": { "type": "string" },
+        "footerMessage": { "type": "string" }
+      },
+      "required": ["shopName", "phone", "address", "currency", "footerMessage"]
+    },
+    "expense": {
+      "title": "Expense",
+      "description": "Store operational expenses",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "category": { "type": "string", "enum": ["Rent", "Electricity", "Salaries", "Transport", "Internet", "Office Expenses", "Maintenance", "Miscellaneous"] },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "date", "category", "description", "amount", "paymentMethod", "createdAt"]
+    },
+    "partner": {
+      "title": "Partner",
+      "description": "Business partner and investor records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "contact": { "type": "string" },
+        "investment": { "type": "number" },
+        "ownershipPercentage": { "type": "number" },
+        "joiningDate": { "type": "string", "format": "date" },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "contact", "investment", "ownershipPercentage", "joiningDate", "status", "createdAt"]
+    },
+    "drawing": {
+      "title": "Partner Drawing",
+      "description": "Record of partner profit withdrawals",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "partnerId": { "type": "string" },
+        "partnerName": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "amount": { "type": "number" },
+        "reason": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "partnerId", "partnerName", "date", "amount", "reason", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/parts/{partId}": {
+      "schema": "part",
+      "description": "Motorcycle parts inventory database"
+    },
+    "/customers/{customerId}": {
+      "schema": "customer",
+      "description": "Customers list and credit balance tracking"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "supplier",
+      "description": "Suppliers list and purchase balance tracking"
+    },
+    "/sales/{saleId}": {
+      "schema": "sale",
+      "description": "Sales POS invoices and returns"
+    },
+    "/purchases/{purchaseId}": {
+      "schema": "purchase",
+      "description": "Purchases from suppliers and returns"
+    },
+    "/adjustments/{adjustmentId}": {
+      "schema": "adjustment",
+      "description": "Stock adjustment records"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "audit_log",
+      "description": "Traceability and history log of activities"
+    },
+    "/payments/{paymentId}": {
+      "schema": "payment",
+      "description": "Payments received/sent records"
+    },
+    "/ledger_entries/{entryId}": {
+      "schema": "ledger_entry",
+      "description": "Customer/Supplier double-entry ledger logs"
+    },
+    "/settings/{settingsId}": {
+      "schema": "settings",
+      "description": "Store-wide configuration settings"
+    },
+    "/expenses/{expenseId}": {
+      "schema": "expense",
+      "description": "Logged shop operational expenses"
+    },
+    "/partners/{partnerId}": {
+      "schema": "partner",
+      "description": "Business partners profile and capital info"
+    },
+    "/drawings/{drawingId}": {
+      "schema": "drawing",
+      "description": "Profit withdrawals (drawings) by business partners"
+    }
+  }
+}

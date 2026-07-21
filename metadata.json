@@ -1,0 +1,8 @@
+{
+  "name": "Motorcycle Parts ERP",
+  "description": "A simple, fast, and professional ERP system for motorcycle spare parts businesses, featuring inventory management, sales POS, credit ledgers, and reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
