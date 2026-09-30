@@ -12,14 +12,14 @@
  */
 
 export const PART_CATEGORIES = [
-  'Loom Spare Parts',
-  'Plant Parts',
-  'Auto Cutting Parts',
-  'Dican 3 Parts',
-  'Quality Department Parts',
-  'Floor Mill Parts',
-  'Bearing',
-  'Belt'
+  'Engine Parts',
+  'Transmission Parts',
+  'Suspension Parts',
+  'Electrical Parts',
+  'Braking System',
+  'Cooling System',
+  'Lighting Parts',
+  'Chassis Parts'
 ] as const;
 
 export type PartCategory = typeof PART_CATEGORIES[number];
@@ -29,14 +29,14 @@ export type PartCategory = typeof PART_CATEGORIES[number];
  * These help users understand what type of part to enter for each category
  */
 export const CATEGORY_PLACEHOLDERS: Record<string, string> = {
-  'Loom Spare Parts': 'e.g., Loom Motor Gear Assembly',
-  'Plant Parts': 'e.g., Plant Machine Shaft',
-  'Auto Cutting Parts': 'e.g., Cutting Blade Holder',
-  'Dican 3 Parts': 'e.g., Dican 3 Machine Component',
-  'Quality Department Parts': 'e.g., Quality Inspection Gauge',
-  'Floor Mill Parts': 'e.g., Floor Mill Roller Bearing',
-  'Bearing': 'e.g., 6204 Deep Groove Ball Bearing',
-  'Belt': 'e.g., V-Belt A42 Industrial'
+  'Engine Parts': 'e.g., Piston, Cylinder Head, Crankshaft',
+  'Transmission Parts': 'e.g., Clutch Plate, Gear Box Assembly',
+  'Suspension Parts': 'e.g., Front Shock Absorber, Rear Springs',
+  'Electrical Parts': 'e.g., Alternator, Battery, Ignition Coil',
+  'Braking System': 'e.g., Brake Pads, Brake Disc, Brake Cylinder',
+  'Cooling System': 'e.g., Radiator, Water Pump, Cooling Fan',
+  'Lighting Parts': 'e.g., Headlight Bulb, Tail Light Assembly',
+  'Chassis Parts': 'e.g., Frame Bracket, Swing Arm, Foot Rest'
 };
 
 /**
@@ -49,4 +49,4 @@ export function getCategoryPlaceholder(category: string): string {
 /**
  * Default category for new parts
  */
-export const DEFAULT_CATEGORY = 'Loom Spare Parts';
+export const DEFAULT_CATEGORY = 'Engine Parts';
