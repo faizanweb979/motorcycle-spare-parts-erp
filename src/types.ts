@@ -12,6 +12,9 @@ export interface Part {
   minStock: number;
   createdAt: string;
   updatedAt: string;
+  notes?: string; // Optional internal notes for identification
+  imageUrl?: string; // Optional part image URL from Firebase Storage
+  isArchived?: boolean; // Optional soft-delete flag
 }
 
 export interface Customer {
@@ -23,6 +26,7 @@ export interface Customer {
   advance?: number; // Advance deposit balance (Rs.)
   lastPaymentDate?: string;
   createdAt: string;
+  isArchived?: boolean; // Optional soft-delete flag
 }
 
 export interface Supplier {
@@ -35,6 +39,7 @@ export interface Supplier {
   advance?: number; // Advance balance (Rs.)
   lastPaymentDate?: string;
   createdAt: string;
+  isArchived?: boolean; // Optional soft-delete flag
 }
 
 export interface SaleItem {

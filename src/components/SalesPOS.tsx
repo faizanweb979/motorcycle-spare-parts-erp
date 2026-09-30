@@ -40,17 +40,20 @@ export const SalesPOS: React.FC = () => {
   const [isReceiptOpen, setIsReceiptOpen] = useState(false);
   const [receiptType, setReceiptType] = useState<'A4' | 'thermal'>('thermal');
 
+  // Double-submission guard
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Overpayment dialog state (for credit sales where paidAmount > cartTotal)
   const [isPosOverpaymentOpen, setIsPosOverpaymentOpen] = useState(false);
   const [pendingSalePayload, setPendingSalePayload] = useState<any>(null);
   const [posOverpaymentExcess, setPosOverpaymentExcess] = useState(0);
 
-  // 1. FILTERED SEARCH FOR PARTS (ONLY WITH STOCK > 0)
+  // 1. FILTERED SEARCH FOR PARTS (ONLY ACTIVE WITH STOCK > 0)
   const posPartResults = useMemo(() => {
     if (!partQuery.trim()) return [];
     const query = partQuery.toLowerCase();
     return parts.filter(p => 
-      p.stock > 0 && (
+      !p.isArchived && p.stock > 0 && (
         p.name.toLowerCase().includes(query) || 
         p.partNumber.toLowerCase().includes(query) || 
         p.brand.toLowerCase().includes(query) ||
@@ -126,6 +129,39 @@ export const SalesPOS: React.FC = () => {
     }).filter(Boolean) as any);
   };
 
+  const setManualQuantity = (partId: string, value: string) => {
+    const part = parts.find(p => p.id === partId);
+    if (!part) return;
+
+    // Parse and validate input
+    const numValue = parseInt(value, 10);
+    
+    // If empty or invalid, keep current value
+    if (value === '' || isNaN(numValue)) {
+      return;
+    }
+
+    // Validate minimum quantity
+    if (numValue < 1) {
+      alert('Quantity must be at least 1');
+      return;
+    }
+
+    // Validate stock availability
+    if (numValue > part.stock) {
+      alert(`Insufficient stock! Maximum ${part.stock} units available.`);
+      return;
+    }
+
+    // Update cart with validated quantity
+    setCart(cart.map(item => {
+      if (item.partId === partId) {
+        return { ...item, quantity: numValue };
+      }
+      return item;
+    }));
+  };
+
   const removeFromCart = (partId: string) => {
     setCart(cart.filter(item => item.partId !== partId));
   };
@@ -141,6 +177,7 @@ export const SalesPOS: React.FC = () => {
   // 4. CHECKOUT SUBMISSION
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return; // double-submission guard
     if (cart.length === 0) {
       alert('Your billing cart is empty.');
       return;
@@ -185,6 +222,8 @@ export const SalesPOS: React.FC = () => {
   };
 
   const submitSalePayload = async (payload: any) => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       const generatedSale = await createSale(payload);
       setActiveReceiptSale(generatedSale);
@@ -192,6 +231,8 @@ export const SalesPOS: React.FC = () => {
       clearPOSRegister();
     } catch (err: any) {
       alert(`POS generation failed: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -207,8 +248,10 @@ export const SalesPOS: React.FC = () => {
 
   // 6. SALES RETURN
   const handleReturnInvoice = async (sale: Sale) => {
+    if (isSubmitting) return;
     const confirmReturn = confirm(`Are you sure you want to completely refund/return Invoice ${sale.invoiceNumber}? This will restore parts to inventory and reduce any outstanding customer credits.`);
     if (confirmReturn) {
+      setIsSubmitting(true);
       try {
         const returnedItems = sale.items.map(item => ({
           partId: item.partId,
@@ -220,8 +263,10 @@ export const SalesPOS: React.FC = () => {
 
         await returnSale(sale.id, returnedItems, refundAmount);
         alert('Invoice successfully returned. Stock levels restored.');
-      } catch (err) {
-        alert('Return process failed.');
+      } catch (err: any) {
+        alert(`Return process failed: ${err.message}`);
+      } finally {
+        setIsSubmitting(false);
       }
     }
   };
@@ -354,7 +399,39 @@ export const SalesPOS: React.FC = () => {
                               >
                                 <Minus className="h-3 w-3" />
                               </button>
-                              <span className="w-8 font-mono font-bold text-center text-slate-800">{item.quantity}</span>
+                              <input
+                                type="text"
+                                value={item.quantity}
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  // Allow only digits
+                                  if (/^\d*$/.test(value)) {
+                                    // Temporarily allow empty for editing
+                                    if (value === '') {
+                                      // Keep current quantity in display, don't update cart yet
+                                      return;
+                                    }
+                                    setManualQuantity(item.partId, value);
+                                  }
+                                }}
+                                onBlur={(e) => {
+                                  // On blur, ensure we have a valid quantity
+                                  if (e.target.value === '' || parseInt(e.target.value) < 1) {
+                                    // Reset to 1 if invalid
+                                    setManualQuantity(item.partId, '1');
+                                  }
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.currentTarget.blur();
+                                  }
+                                  // Prevent decimal point, minus, plus, e
+                                  if (['.', '-', '+', 'e', 'E'].includes(e.key)) {
+                                    e.preventDefault();
+                                  }
+                                }}
+                                className="w-12 font-mono font-bold text-center text-slate-800 bg-transparent focus:bg-blue-50 focus:outline-none rounded px-1"
+                              />
                               <button 
                                 type="button" 
                                 onClick={() => updateQuantity(item.partId, 1)}
@@ -399,7 +476,7 @@ export const SalesPOS: React.FC = () => {
                     className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:border-blue-500"
                   >
                     <option value="CASH-CUSTOMER">Walk-In Cash Customer</option>
-                    {customers.map(c => (
+                    {customers.filter(c => !c.isArchived).map(c => (
                       <option key={c.id} value={c.id}>
                         {c.name} (Phone: {c.phone} - Bal: Rs. {c.balance})
                       </option>
@@ -527,11 +604,11 @@ export const SalesPOS: React.FC = () => {
 
               <button
                 type="submit"
-                disabled={cart.length === 0}
+                disabled={cart.length === 0 || isSubmitting}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-400 font-bold text-white py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-500/10 flex items-center justify-center gap-1.5 uppercase tracking-wider"
               >
                 <CheckCircle2 className="h-4 w-4" />
-                <span>Issue POS Invoice</span>
+                <span>{isSubmitting ? 'Processing...' : 'Issue POS Invoice'}</span>
               </button>
             </form>
           </div>
@@ -616,7 +693,8 @@ export const SalesPOS: React.FC = () => {
                             {!isReturned && (
                               <button
                                 onClick={() => handleReturnInvoice(sale)}
-                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                                disabled={isSubmitting}
+                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Return Sale (Refund)"
                               >
                                 <CornerUpLeft className="h-3.5 w-3.5" />

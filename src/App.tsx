@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { 
   onAuthStateChanged, 
   signInWithEmailAndPassword, 
@@ -21,6 +22,7 @@ import { Reports } from './components/Reports';
 import { Settings } from './components/Settings';
 import { Expenses } from './components/Expenses';
 import { Partners } from './components/Partners';
+import { PartDetailPage } from './components/PartDetail';
 
 // Lazy load AI Assistant
 const AIAssistant = React.lazy(() => import('./components/AIAssistant').then(m => ({ default: m.AIAssistant })));
@@ -124,10 +126,10 @@ export default function App() {
           {/* Header */}
           <div className="p-6 bg-slate-950 border-b border-slate-800 flex flex-col items-center gap-1.5 text-center">
             <div className="h-11 w-11 bg-blue-600 rounded-xl flex items-center justify-center shadow-md shadow-blue-600/20">
-              <span className="text-white font-black text-2xl">M</span>
+              <span className="text-white font-black text-2xl">B</span>
             </div>
             <h1 className="text-base font-bold text-white tracking-tight mt-1.5">Motorcycle Spare Parts ERP</h1>
-            <p className="text-[10px] text-slate-400 uppercase tracking-widest font-mono">Bismillah Autos & Spare Parts</p>
+            <p className="text-[10px] text-slate-400 uppercase tracking-widest font-mono">BIN ADAM TRADERS</p>
           </div>
 
           <div className="p-6">
@@ -229,107 +231,145 @@ export default function App() {
   // IF LOGGED IN, wrap layout with Context Provider
   return (
     <ERPProvider>
-      <div className="min-h-screen bg-slate-50">
-        <Sidebar 
-          activeTab={activeTab} 
-          setActiveTab={setActiveTab} 
-          userEmail={user.email} 
-        />
-        
-        <Header 
-          setActiveTab={setActiveTab}
-          onOpenQuickAddPart={() => {
-            setActiveTab('parts');
-            setShowAddPartForm(true);
-          }}
-          onOpenQuickAddCustomer={() => {
-            setActiveTab('customers');
-            setShowAddCustomerForm(true);
-          }}
-          onOpenQuickAddSupplier={() => {
-            setActiveTab('suppliers');
-          }}
-        />
-
-        {/* Content Box with strict margins to offset sidebar & fixed header */}
-        <main className="pl-64 pt-16 min-h-screen">
-          <div className="p-8 max-w-[1600px] mx-auto">
-            {activeTab === 'dashboard' && (
-              <Dashboard 
-                setActiveTab={setActiveTab} 
-                onSelectPart={(part) => {
-                  setSelectedPartId(part.id);
+      <Routes>
+        {/* Part Detail — full URL route, loads part directly from Firestore */}
+        <Route
+          path="/parts/:partId"
+          element={
+            <div className="min-h-screen bg-slate-50">
+              <Sidebar
+                activeTab="parts"
+                setActiveTab={setActiveTab}
+                userEmail={user.email}
+              />
+              <Header
+                setActiveTab={setActiveTab}
+                onOpenQuickAddPart={() => {
                   setActiveTab('parts');
+                  setShowAddPartForm(true);
+                }}
+                onOpenQuickAddCustomer={() => {
+                  setActiveTab('customers');
+                  setShowAddCustomerForm(true);
+                }}
+                onOpenQuickAddSupplier={() => {
+                  setActiveTab('suppliers');
                 }}
               />
-            )}
-            
-            {activeTab === 'parts' && (
-              <PartsMaster 
-                selectedPartId={selectedPartId}
-                setSelectedPartId={setSelectedPartId}
-                showAddFormGlobally={showAddPartForm}
-                setShowAddFormGlobally={setShowAddPartForm}
-              />
-            )}
-
-            {activeTab === 'inventory' && (
-              <Inventory />
-            )}
-
-            {activeTab === 'sales' && (
-              <SalesPOS />
-            )}
-
-            {activeTab === 'purchases' && (
-              <Purchases />
-            )}
-
-            {activeTab === 'customers' && (
-              <Ledger 
-                type="customers" 
-                showAddFormGlobally={showAddCustomerForm}
-                setShowAddFormGlobally={setShowAddCustomerForm}
-              />
-            )}
-
-            {activeTab === 'suppliers' && (
-              <Ledger 
-                type="suppliers" 
-                showAddFormGlobally={false}
-                setShowAddFormGlobally={() => {}}
-              />
-            )}
-
-            {activeTab === 'expenses' && (
-              <Expenses />
-            )}
-
-            {activeTab === 'partners' && (
-              <Partners />
-            )}
-
-            {activeTab === 'reports' && (
-              <Reports />
-            )}
-
-            {activeTab === 'ai_assistant' && (
-              <React.Suspense fallback={
-                <div className="flex flex-col items-center justify-center p-12 text-slate-400 gap-4">
-                  <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-xs font-mono tracking-widest uppercase">Lazy loading AI Advisory Module...</p>
+              <main className="pl-64 pt-16 min-h-screen">
+                <div className="p-8 max-w-[1600px] mx-auto">
+                  <PartDetailPage />
                 </div>
-              }>
-                <AIAssistant />
-              </React.Suspense>
-            )}
+              </main>
+            </div>
+          }
+        />
 
-            {activeTab === 'settings' && (
-              <Settings />
-            )}
-          </div>
-        </main>
-      </div>
+        {/* Main app layout — all other tabs */}
+        <Route
+          path="*"
+          element={
+            <div className="min-h-screen bg-slate-50">
+              <Sidebar
+                activeTab={activeTab}
+                setActiveTab={setActiveTab}
+                userEmail={user.email}
+              />
+              <Header
+                setActiveTab={setActiveTab}
+                onOpenQuickAddPart={() => {
+                  setActiveTab('parts');
+                  setShowAddPartForm(true);
+                }}
+                onOpenQuickAddCustomer={() => {
+                  setActiveTab('customers');
+                  setShowAddCustomerForm(true);
+                }}
+                onOpenQuickAddSupplier={() => {
+                  setActiveTab('suppliers');
+                }}
+              />
+              <main className="pl-64 pt-16 min-h-screen">
+                <div className="p-8 max-w-[1600px] mx-auto">
+                  {activeTab === 'dashboard' && (
+                    <Dashboard
+                      setActiveTab={setActiveTab}
+                      onSelectPart={(part) => {
+                        setSelectedPartId(part.id);
+                        setActiveTab('parts');
+                      }}
+                    />
+                  )}
+
+                  {activeTab === 'parts' && (
+                    <PartsMaster
+                      selectedPartId={selectedPartId}
+                      setSelectedPartId={setSelectedPartId}
+                      showAddFormGlobally={showAddPartForm}
+                      setShowAddFormGlobally={setShowAddPartForm}
+                    />
+                  )}
+
+                  {activeTab === 'inventory' && (
+                    <Inventory />
+                  )}
+
+                  {activeTab === 'sales' && (
+                    <SalesPOS />
+                  )}
+
+                  {activeTab === 'purchases' && (
+                    <Purchases />
+                  )}
+
+                  {activeTab === 'customers' && (
+                    <Ledger
+                      type="customers"
+                      showAddFormGlobally={showAddCustomerForm}
+                      setShowAddFormGlobally={setShowAddCustomerForm}
+                    />
+                  )}
+
+                  {activeTab === 'suppliers' && (
+                    <Ledger
+                      type="suppliers"
+                      showAddFormGlobally={false}
+                      setShowAddFormGlobally={() => {}}
+                    />
+                  )}
+
+                  {activeTab === 'expenses' && (
+                    <Expenses />
+                  )}
+
+                  {activeTab === 'partners' && (
+                    <Partners />
+                  )}
+
+                  {activeTab === 'reports' && (
+                    <Reports />
+                  )}
+
+                  {activeTab === 'ai_assistant' && (
+                    <React.Suspense fallback={
+                      <div className="flex flex-col items-center justify-center p-12 text-slate-400 gap-4">
+                        <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                        <p className="text-xs font-mono tracking-widest uppercase">Lazy loading AI Advisory Module...</p>
+                      </div>
+                    }>
+                      <AIAssistant />
+                    </React.Suspense>
+                  )}
+
+                  {activeTab === 'settings' && (
+                    <Settings />
+                  )}
+                </div>
+              </main>
+            </div>
+          }
+        />
+      </Routes>
     </ERPProvider>
   );
 }

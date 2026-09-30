@@ -33,6 +33,7 @@ import {
   Pie,
   Legend
 } from 'recharts';
+import { DEFAULT_CATEGORY } from '../constants/categories';
 
 export const Reports: React.FC = () => {
   const { parts, customers, suppliers, sales, purchases, adjustments, settings, expenses, partners, drawings } = useERP();
@@ -45,15 +46,30 @@ export const Reports: React.FC = () => {
   // 1. ANALYTICS CALCULATIONS (ORIGINAL VIEW)
   // ==========================================
   const financialTotals = useMemo(() => {
+    const now = new Date();
+    // Use local calendar boundaries - set time to 00:00:00.000 local time
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    let startDate: Date;
+    if (dateRange === 'today') {
+      startDate = startOfToday;
+    } else if (dateRange === '7days') {
+      // 7 actual calendar days: from 6 days ago at 00:00:00 to today at 23:59:59
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0);
+    } else {
+      // 30 actual calendar days: from 29 days ago at 00:00:00 to today at 23:59:59
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29, 0, 0, 0, 0);
+    }
+
+    const startMs = startDate.getTime();
+    const endMs = endOfToday.getTime();
+
     const filteredSales = sales.filter(s => {
       if (s.status !== 'completed') return false;
-      const saleDate = new Date(s.date);
-      const diffTime = Math.abs(new Date().getTime() - saleDate.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
-      if (dateRange === '7days') return diffDays <= 7;
-      if (dateRange === 'today') return diffDays <= 1;
-      return diffDays <= 30;
+      // Parse the ISO date string and get timestamp - this handles timezone correctly
+      const saleTime = new Date(s.date).getTime();
+      return saleTime >= startMs && saleTime <= endMs;
     });
 
     let grossSalesRevenue = 0;
@@ -84,26 +100,39 @@ export const Reports: React.FC = () => {
   }, [sales, dateRange]);
 
   const salesChartData = useMemo(() => {
-    const dailyMap: { [key: string]: { date: string; revenue: number; profit: number } } = {};
-    const rangeLength = dateRange === '7days' ? 7 : 30;
+    const now = new Date();
+    const rangeLength = dateRange === 'today' ? 1 : dateRange === '7days' ? 7 : 30;
+
+    const days: { date: string; startMs: number; endMs: number; revenue: number; profit: number }[] = [];
+
     for (let i = rangeLength - 1; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      dailyMap[dateStr] = { date: dateStr, revenue: 0, profit: 0 };
+      // Use local calendar boundaries for each day
+      const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i, 0, 0, 0, 0);
+      const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i, 23, 59, 59, 999);
+      const dateStr = dayStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+      days.push({
+        date: dateStr,
+        startMs: dayStart.getTime(),
+        endMs: dayEnd.getTime(),
+        revenue: 0,
+        profit: 0
+      });
     }
 
     sales.forEach(s => {
       if (s.status !== 'completed') return;
-      const dateStr = new Date(s.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      if (dailyMap[dateStr]) {
+      // Parse the ISO date string and get timestamp - this handles timezone correctly
+      const saleTime = new Date(s.date).getTime();
+      const targetDay = days.find(d => saleTime >= d.startMs && saleTime <= d.endMs);
+      if (targetDay) {
         const costOfItems = s.items.reduce((sum, item) => sum + (item.purchasePrice * item.quantity), 0);
-        dailyMap[dateStr].revenue += (s.totalAmount - s.discount);
-        dailyMap[dateStr].profit += ((s.totalAmount - s.discount) - costOfItems);
+        targetDay.revenue += (s.totalAmount - s.discount);
+        targetDay.profit += ((s.totalAmount - s.discount) - costOfItems);
       }
     });
 
-    return Object.values(dailyMap);
+    return days.map(({ date, revenue, profit }) => ({ date, revenue, profit }));
   }, [sales, dateRange]);
 
   const topParts = useMemo(() => {
@@ -130,7 +159,7 @@ export const Reports: React.FC = () => {
       if (s.status !== 'completed') return;
       s.items.forEach(item => {
         const originalPart = parts.find(p => p.id === item.partId);
-        const category = originalPart?.category || 'Engine Parts';
+        const category = originalPart?.category || DEFAULT_CATEGORY;
         catMap[category] = (catMap[category] || 0) + (item.retailPrice * item.quantity);
       });
     });
@@ -451,7 +480,7 @@ export const Reports: React.FC = () => {
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs ring-2 ring-emerald-500/10 bg-emerald-50/10">
-              <span className="text-[10px] text-emerald-800 font-bold uppercase tracking-wider block">Net Markup Profit</span>
+              <span className="text-[10px] text-emerald-800 font-bold uppercase tracking-wider block">Gross Profit</span>
               <h3 className="text-2xl font-black text-emerald-600 font-mono mt-1">Rs. {financialTotals.grossProfit.toLocaleString()}</h3>
               <div className="flex items-center gap-1 text-[10px] text-emerald-700 font-bold font-mono mt-1">
                 <TrendingUp className="h-3 w-3 shrink-0" />
@@ -488,7 +517,7 @@ export const Reports: React.FC = () => {
                     <YAxis stroke="#94a3b8" fontSize={10} tickLine={false} />
                     <Tooltip contentStyle={{ fontSize: '11px', fontFamily: 'monospace', borderRadius: '8px' }} />
                     <Area type="monotone" dataKey="revenue" name="Collection" stroke="#f59e0b" strokeWidth={2} fillOpacity={1} fill="url(#colorRev)" />
-                    <Area type="monotone" dataKey="profit" name="Net Margin" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorProfit)" />
+                    <Area type="monotone" dataKey="profit" name="Gross Margin" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorProfit)" />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>

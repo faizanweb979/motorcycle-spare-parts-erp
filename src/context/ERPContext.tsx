@@ -1,17 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import {
-  collection,
-  doc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  getDocs,
-  onSnapshot,
-  writeBatch,
-  query,
-  orderBy,
-  limit
-} from 'firebase/firestore';
+import { collection, doc, writeBatch, setDoc, deleteDoc, getDocs, query, where, orderBy, limit, onSnapshot, runTransaction, serverTimestamp, increment, clearIndexedDbPersistence, updateDoc } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from '../firebase';
 import {
   Part,
@@ -114,7 +102,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [partners, setPartners] = useState<Partner[]>([]);
   const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [settings, setSettings] = useState<ShopSettings>({
-    shopName: 'Bismillah Autos & Spare Parts',
+    shopName: 'BIN ADAM TRADERS',
     phone: '0300-1234567',
     address: 'McLeod Road, Lahore, Pakistan',
     currency: 'Rs.',
@@ -122,6 +110,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [skipCache, setSkipCache] = useState(false);
 
   // Firestore Offline Sync Tracking
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -179,6 +168,72 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setLoading(true);
     setError(null);
+
+    // ── Seed counters above existing data on first use ───────────────────
+    // Runs silently in background; does not block UI load.
+    // Uses a transaction so two tabs seeding simultaneously cannot race.
+    const seedCountersIfNeeded = async () => {
+      try {
+        // Determine the highest existing number for each counter type
+        // by scanning existing documents.
+        const [salesSnap, purchasesSnap, paymentsSnap] = await Promise.all([
+          getDocs(collection(db, 'sales')),
+          getDocs(collection(db, 'purchases')),
+          getDocs(collection(db, 'payments'))
+        ]);
+
+        // Extract max invoice numbers from existing sales (format: INV-MT-NNNN)
+        let maxSalesSeq = 1000; // default: next will be 1001
+        salesSnap.forEach(d => {
+          const inv: string = d.data().invoiceNumber || '';
+          const match = inv.match(/^INV-MT-(\d+)$/);
+          if (match) maxSalesSeq = Math.max(maxSalesSeq, parseInt(match[1], 10));
+        });
+
+        // Extract max from purchases (format: PUR-MT-NNNN)
+        let maxPurchaseSeq = 5000; // default: next will be 5001
+        purchasesSnap.forEach(d => {
+          const inv: string = d.data().invoiceNumber || '';
+          const match = inv.match(/^PUR-MT-(\d+)$/);
+          if (match) maxPurchaseSeq = Math.max(maxPurchaseSeq, parseInt(match[1], 10));
+        });
+
+        // Extract max from payments — split by REC- and PAY-
+        let maxRecSeq = 100000;  // next: REC-100001
+        let maxPaySeq = 100000;  // next: PAY-100001
+        paymentsSnap.forEach(d => {
+          const vn: string = d.data().voucherNumber || '';
+          const recMatch = vn.match(/^REC-(\d+)$/);
+          const payMatch = vn.match(/^PAY-(\d+)$/);
+          if (recMatch) maxRecSeq = Math.max(maxRecSeq, parseInt(recMatch[1], 10));
+          if (payMatch) maxPaySeq = Math.max(maxPaySeq, parseInt(payMatch[1], 10));
+        });
+
+        // For each counter, set it to the current max if the counter document
+        // doesn't already exist or is lower than the data max.
+        const counterUpdates = [
+          { name: 'salesInvoice',    floor: maxSalesSeq },
+          { name: 'purchaseInvoice', floor: maxPurchaseSeq },
+          { name: 'customerReceipt', floor: maxRecSeq },
+          { name: 'supplierPayment', floor: maxPaySeq }
+        ];
+
+        for (const { name, floor } of counterUpdates) {
+          await runTransaction(db, async (txn) => {
+            const ref = doc(db, 'counters', name);
+            const snap = await txn.get(ref);
+            if (!snap.exists() || (snap.data().seq as number) < floor) {
+              txn.set(ref, { seq: floor });
+            }
+          });
+        }
+      } catch (e) {
+        // Non-fatal: counters will self-correct on first allocation
+        console.warn('Counter seeding failed (non-fatal):', e);
+      }
+    };
+
+    seedCountersIfNeeded();
 
     // Set up real-time observers with error handlers mapped exactly to standard
     const unsubParts = onSnapshot(collection(db, 'parts'), { includeMetadataChanges: true }, (snapshot) => {
@@ -446,8 +501,25 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const partRef = doc(db, 'parts', id);
     const deletedName = parts.find(p => p.id === id)?.name || id;
 
-    batch.delete(partRef);
-    addAuditLog(batch, 'DELETE_PART', `Deleted spare part: ${deletedName}`);
+    // Check transaction history references across sales, purchases, and adjustments
+    const isReferencedInSales = sales.some(s => s.items.some(item => item.partId === id));
+    const isReferencedInPurchases = purchases.some(p => p.items.some(item => item.partId === id));
+    const isReferencedInAdjustments = adjustments.some(a => a.partId === id);
+
+    const hasHistory = isReferencedInSales || isReferencedInPurchases || isReferencedInAdjustments;
+
+    if (hasHistory) {
+      // Soft-delete (archive) to preserve full transaction history
+      batch.update(partRef, {
+        isArchived: true,
+        updatedAt: new Date().toISOString()
+      });
+      addAuditLog(batch, 'ARCHIVE_PART', `Archived spare part with transaction history: ${deletedName}`);
+    } else {
+      // Unused record: hard delete allowed
+      batch.delete(partRef);
+      addAuditLog(batch, 'DELETE_PART', `Permanently deleted unused spare part: ${deletedName}`);
+    }
 
     try {
       await batch.commit();
@@ -502,9 +574,89 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateCustomer = async (id: string, customerData: Partial<Customer>) => {
     try {
-      const custRef = doc(db, 'customers', id);
-      await updateDoc(custRef, customerData);
-      await addManualAuditLog('UPDATE_CUSTOMER', `Updated customer details/balance for: ${customerData.name || id}`);
+      // Find existing starting_balance ledger entries for this customer
+      const ledgerQuery = query(
+        collection(db, 'ledger_entries'),
+        where('entityId', '==', id),
+        where('entityType', '==', 'customer')
+      );
+      const ledgerSnap = await getDocs(ledgerQuery);
+      const openingDocs = ledgerSnap.docs.filter(
+        d => d.data().transactionType === 'starting_balance' || d.data().referenceId === 'STARTING_BALANCE'
+      );
+
+      await runTransaction(db, async (txn) => {
+        // ── Phase 1: Read all data first ───────────────────────────────────────
+        const custRef = doc(db, 'customers', id);
+        const custSnap = await txn.get(custRef);
+        if (!custSnap.exists()) {
+          throw new Error(`Customer ${id} not found.`);
+        }
+
+        const existingCust = custSnap.data() as Customer;
+        const now = new Date().toISOString();
+
+        if (customerData.balance !== undefined) {
+          const newOB = Number(customerData.balance) || 0;
+          let oldOB = 0;
+          const primaryOpeningDoc = openingDocs.length > 0 ? openingDocs[0] : null;
+
+          // ── Phase 1: Read all data first (no writes yet) ─────────────────────
+          let primarySnap = null;
+          if (primaryOpeningDoc) {
+            primarySnap = await txn.get(primaryOpeningDoc.ref);
+            if (primarySnap.exists()) {
+              const entryData = primarySnap.data() as LedgerEntry;
+              oldOB = (entryData.debit || 0) - (entryData.credit || 0);
+            }
+          }
+
+          // ── Phase 2: All writes after reads ───────────────────────────────────
+          const deltaOB = newOB - oldOB;
+          const currentProfileBalance = Number(existingCust.balance) || 0;
+          const updatedProfileBalance = currentProfileBalance + deltaOB;
+
+          const isDebit = newOB > 0;
+          const newDebit = isDebit ? newOB : 0;
+          const newCredit = !isDebit ? Math.abs(newOB) : 0;
+
+          if (primaryOpeningDoc) {
+            txn.update(primaryOpeningDoc.ref, {
+              debit: newDebit,
+              credit: newCredit,
+              description: 'Starting Balance (Opening Balance)'
+            });
+
+            // Delete any duplicate opening entries if found
+            for (let i = 1; i < openingDocs.length; i++) {
+              txn.delete(openingDocs[i].ref);
+            }
+          } else {
+            // Create opening ledger entry if not present
+            const newLedgerRef = doc(collection(db, 'ledger_entries'));
+            const ledgerEntry: LedgerEntry = {
+              id: newLedgerRef.id,
+              entityId: id,
+              entityType: 'customer',
+              date: now,
+              transactionType: 'starting_balance',
+              referenceId: 'STARTING_BALANCE',
+              referenceNumber: 'OPENING',
+              description: 'Starting Balance (Opening Balance)',
+              debit: newDebit,
+              credit: newCredit,
+              createdAt: now
+            };
+            txn.set(newLedgerRef, ledgerEntry);
+          }
+
+          txn.update(custRef, { balance: updatedProfileBalance });
+        }
+
+        txn.update(custRef, customerData);
+      });
+
+      await addManualAuditLog('UPDATE_CUSTOMER', `Updated customer details/opening balance for: ${customerData.name || id}`);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `customers/${id}`);
     }
@@ -514,8 +666,21 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const custRef = doc(db, 'customers', id);
       const deletedName = customers.find(c => c.id === id)?.name || id;
-      await deleteDoc(custRef);
-      await addManualAuditLog('DELETE_CUSTOMER', `Deleted customer profile: ${deletedName}`);
+
+      // Check transaction history references across sales, payments, and ledger entries
+      const isReferencedInSales = sales.some(s => s.customerId === id);
+      const isReferencedInPayments = payments.some(p => p.entityId === id && p.entityType === 'customer');
+      const isReferencedInLedger = ledgerEntries.some(l => l.entityId === id && l.entityType === 'customer');
+
+      const hasHistory = isReferencedInSales || isReferencedInPayments || isReferencedInLedger;
+
+      if (hasHistory) {
+        await updateDoc(custRef, { isArchived: true });
+        await addManualAuditLog('ARCHIVE_CUSTOMER', `Archived customer profile with transaction history: ${deletedName}`);
+      } else {
+        await deleteDoc(custRef);
+        await addManualAuditLog('DELETE_CUSTOMER', `Permanently deleted unused customer profile: ${deletedName}`);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, `customers/${id}`);
     }
@@ -567,9 +732,88 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateSupplier = async (id: string, supplierData: Partial<Supplier>) => {
     try {
-      const suppRef = doc(db, 'suppliers', id);
-      await updateDoc(suppRef, supplierData);
-      await addManualAuditLog('UPDATE_SUPPLIER', `Updated supplier details/balance for: ${supplierData.name || id}`);
+      // Find existing starting_balance ledger entries for this supplier
+      const ledgerQuery = query(
+        collection(db, 'ledger_entries'),
+        where('entityId', '==', id),
+        where('entityType', '==', 'supplier')
+      );
+      const ledgerSnap = await getDocs(ledgerQuery);
+      const openingDocs = ledgerSnap.docs.filter(
+        d => d.data().transactionType === 'starting_balance' || d.data().referenceId === 'STARTING_BALANCE'
+      );
+
+      await runTransaction(db, async (txn) => {
+        const suppRef = doc(db, 'suppliers', id);
+        const suppSnap = await txn.get(suppRef);
+        if (!suppSnap.exists()) {
+          throw new Error(`Supplier ${id} not found.`);
+        }
+
+        const existingSupp = suppSnap.data() as Supplier;
+        const now = new Date().toISOString();
+
+        if (supplierData.balance !== undefined) {
+          const newOB = Number(supplierData.balance) || 0;
+          let oldOB = 0;
+          const primaryOpeningDoc = openingDocs.length > 0 ? openingDocs[0] : null;
+
+          if (primaryOpeningDoc) {
+            // ── Phase 1 continued: Read all data first (no writes yet) ───────────
+            const primarySnap = await txn.get(primaryOpeningDoc.ref);
+            if (primarySnap.exists()) {
+              const entryData = primarySnap.data() as LedgerEntry;
+              oldOB = (entryData.credit || 0) - (entryData.debit || 0);
+            }
+          }
+
+          // ── Phase 2: All writes after reads ───────────────────────────────────
+
+          const deltaOB = newOB - oldOB;
+          const currentProfileBalance = Number(existingSupp.balance) || 0;
+          const updatedProfileBalance = currentProfileBalance + deltaOB;
+
+          const isCredit = newOB > 0;
+          const newCredit = isCredit ? newOB : 0;
+          const newDebit = !isCredit ? Math.abs(newOB) : 0;
+
+          if (primaryOpeningDoc) {
+            txn.update(primaryOpeningDoc.ref, {
+              debit: newDebit,
+              credit: newCredit,
+              description: 'Starting Balance (Opening Balance)'
+            });
+
+            // Delete any duplicate opening entries if found
+            for (let i = 1; i < openingDocs.length; i++) {
+              txn.delete(openingDocs[i].ref);
+            }
+          } else {
+            // Create opening ledger entry if not present
+            const newLedgerRef = doc(collection(db, 'ledger_entries'));
+            const ledgerEntry: LedgerEntry = {
+              id: newLedgerRef.id,
+              entityId: id,
+              entityType: 'supplier',
+              date: existingSupp.createdAt || now,
+              transactionType: 'starting_balance',
+              referenceId: 'STARTING_BALANCE',
+              referenceNumber: 'OB-START',
+              description: 'Starting Balance (Opening Balance)',
+              debit: newDebit,
+              credit: newCredit,
+              createdAt: existingSupp.createdAt || now
+            };
+            txn.set(newLedgerRef, ledgerEntry);
+          }
+
+          supplierData.balance = updatedProfileBalance;
+        }
+
+        txn.update(suppRef, supplierData);
+      });
+
+      await addManualAuditLog('UPDATE_SUPPLIER', `Updated supplier details/opening balance for: ${supplierData.name || id}`);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `suppliers/${id}`);
     }
@@ -579,182 +823,292 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const suppRef = doc(db, 'suppliers', id);
       const deletedName = suppliers.find(s => s.id === id)?.name || id;
-      await deleteDoc(suppRef);
-      await addManualAuditLog('DELETE_SUPPLIER', `Deleted supplier profile: ${deletedName}`);
+
+      // Check transaction history references across purchases, payments, and ledger entries
+      const isReferencedInPurchases = purchases.some(p => p.supplierId === id);
+      const isReferencedInPayments = payments.some(p => p.entityId === id && p.entityType === 'supplier');
+      const isReferencedInLedger = ledgerEntries.some(l => l.entityId === id && l.entityType === 'supplier');
+
+      const hasHistory = isReferencedInPurchases || isReferencedInPayments || isReferencedInLedger;
+
+      if (hasHistory) {
+        await updateDoc(suppRef, { isArchived: true });
+        await addManualAuditLog('ARCHIVE_SUPPLIER', `Archived supplier profile with transaction history: ${deletedName}`);
+      } else {
+        await deleteDoc(suppRef);
+        await addManualAuditLog('DELETE_SUPPLIER', `Permanently deleted unused supplier profile: ${deletedName}`);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, `suppliers/${id}`);
     }
   };
 
+  // ── ATOMIC SEQUENCE COUNTER SYSTEM ───────────────────────────────────────
+  //
+  // Counter documents live at: counters/{counterName}  →  { seq: number }
+  //
+  // allocateSequence(txn, counterName, minValue)
+  //   Must be called INSIDE an existing runTransaction() callback.
+  //   Reads the counter, ensures it is at least minValue, increments by 1,
+  //   writes the new value back, and returns the new sequence number.
+  //   Two concurrent transactions on the same counter will contend and retry,
+  //   guaranteeing uniqueness.
+  //
+  // ensureCounterExists(counterName, minValue)
+  //   Called once at startup and before each sequence allocation.
+  //   If the counter document does not exist, creates it at minValue - 1
+  //   so the first allocation returns minValue.
+  //   Safe to call concurrently (uses setDoc merge: false only if absent).
+
+  const allocateSequence = (txn: any, counterName: string, minValue: number): Promise<number> => {
+    // This is a synchronous helper used INSIDE a runTransaction callback.
+    // It reads via txn.get, increments, txn.set, and returns the new seq.
+    // (Must be awaited by the caller.)
+    const counterRef = doc(db, 'counters', counterName);
+    return txn.get(counterRef).then((snap: any) => {
+      const current = snap.exists() ? (snap.data().seq as number) : minValue - 1;
+      const next = Math.max(current, minValue - 1) + 1;
+      txn.set(counterRef, { seq: next });
+      return next;
+    });
+  };
+
+  // Ensures counter exists and is seeded above existing data.
+  // Called inside the transaction (via allocateSequence) so no separate call needed.
+  // However, we expose this for use in createSale's existing transaction.
+
   // 4. SALES (POS) Actions
-  const createSale = async (saleData: Omit<Sale, 'id' | 'createdAt' | 'invoiceNumber'>) => {
-    const batch = writeBatch(db);
+  const createSale = async (saleData: Omit<Sale, 'id' | 'createdAt' | 'invoiceNumber'>): Promise<Sale> => {
+    // ── Debug auth state ──────────────────────────────────────────────────────
+    console.log('createSale - Auth check:', auth.currentUser);
+    console.log('createSale - Auth email:', auth.currentUser?.email);
+    console.log('createSale - Auth UID:', auth.currentUser?.uid);
+    
+    // ── Offline guard ────────────────────────────────────────────────────────
+    // runTransaction requires a live server round-trip for stock validation.
+    // Firestore's offline persistence would queue the write without ever
+    // executing the read-validate logic, defeating the concurrency protection.
+    if (!navigator.onLine) {
+      throw new Error('You are offline. Please reconnect to complete the sale. Stock cannot be validated without a server connection.');
+    }
+
+    const now = new Date().toISOString();
+
+    // Pre-allocate doc refs outside the transaction so IDs are stable
     const saleRef = doc(collection(db, 'sales'));
     const id = saleRef.id;
-    const now = new Date().toISOString();
-    
-    // Generate Invoice Number e.g. INV-2026-1001
-    const totalSalesCount = sales.length;
-    const invoiceNumber = `INV-MT-${1000 + totalSalesCount + 1}`;
+    const adjRefs = saleData.items.map(() => doc(collection(db, 'adjustments')));
+    const auditRef = doc(collection(db, 'audit_logs'));
 
-    const newSale: Sale = {
-      ...saleData,
-      id,
-      invoiceNumber,
-      createdAt: now
-    };
+    // Customer ledger refs (allocated outside transaction for stable IDs)
+    const ledgerRef = doc(collection(db, 'ledger_entries'));
+    const adjLedgerRef = doc(collection(db, 'ledger_entries'));
+    const saleAdvLedgerRef = doc(collection(db, 'ledger_entries'));
 
-    batch.set(saleRef, newSale);
+    // invoiceNumber is allocated atomically inside the transaction below
+    let completedSale: Sale;
 
-    // Deduct stock for each item, add inventory adjustment logs
-    newSale.items.forEach((item) => {
-      const partRef = doc(db, 'parts', item.partId);
-      const currentPart = parts.find(p => p.id === item.partId);
-      if (currentPart) {
-        batch.update(partRef, {
-          stock: Math.max(0, currentPart.stock - item.quantity),
-          updatedAt: now
-        });
-      }
+    try {
+      await runTransaction(db, async (txn) => {
+        // ── Phase 1: Read latest server stock for every item ─────────────────
+        const partDocs = await Promise.all(
+          saleData.items.map(item => txn.get(doc(db, 'parts', item.partId)))
+        );
 
-      const adjRef = doc(collection(db, 'adjustments'));
-      const adjustment: Adjustment = {
-        id: adjRef.id,
-        partId: item.partId,
-        partName: item.name,
-        type: 'sale',
-        quantity: item.quantity,
-        price: item.retailPrice,
-        referenceId: invoiceNumber,
-        reason: `Sold via POS Invoice ${invoiceNumber}`,
-        createdAt: now
-      };
-      batch.set(adjRef, adjustment);
-    });
+        // ── Phase 2: Read customer doc if needed ─────────────────────────────
+        let custSnap = null;
+        if (saleData.customerId !== 'CASH-CUSTOMER') {
+          custSnap = await txn.get(doc(db, 'customers', saleData.customerId));
+        }
 
-    // Update customer credit balance if credit purchase/ledger balance occurs
-    if (newSale.customerId !== 'CASH-CUSTOMER') {
-      const customerRef = doc(db, 'customers', newSale.customerId);
-      const currentCust = customers.find(c => c.id === newSale.customerId);
-      if (currentCust) {
-        let newBalance = Number(currentCust.balance) || 0;
-        let newAdvance = Number(currentCust.advance) || 0;
+        // ── Phase 3: Allocate atomic invoice number (after all reads) ─────────
+        const seqNum = await allocateSequence(txn, 'salesInvoice', 1001);
+        const invoiceNumber = `INV-MT-${seqNum}`;
 
-        const netPayable = newSale.totalAmount - newSale.discount;
-        const netDifference = netPayable - newSale.paidAmount;
-
-        if (netDifference > 0) {
-          const advanceToAdjust = Math.min(newAdvance, netDifference);
-          if (advanceToAdjust > 0) {
-            newAdvance -= advanceToAdjust;
-            const remainingBalanceAmount = netDifference - advanceToAdjust;
-            newBalance += remainingBalanceAmount;
-
-            // Add Ledger Entry for Advance Adjustment
-            const adjLedgerRef = doc(collection(db, 'ledger_entries'));
-            const adjLedgerEntry: LedgerEntry = {
-              id: adjLedgerRef.id,
-              entityId: newSale.customerId,
-              entityType: 'customer',
-              date: now,
-              transactionType: 'payment_received',
-              referenceId: id,
-              referenceNumber: invoiceNumber,
-              description: `Advance Balance Applied: Rs. ${advanceToAdjust} applied to POS Bill ${invoiceNumber}`,
-              debit: 0,
-              credit: advanceToAdjust,
-              createdAt: now
-            };
-            batch.set(adjLedgerRef, adjLedgerEntry);
-          } else {
-            newBalance += netDifference;
+        // ── Phase 4: Validate stock server-side ──────────────────────────────
+        const insufficientItems: string[] = [];
+        for (let i = 0; i < saleData.items.length; i++) {
+          const item = saleData.items[i];
+          const snap = partDocs[i];
+          if (!snap.exists()) {
+            insufficientItems.push(`${item.name} (part not found in database)`);
+            continue;
           }
-        } else if (netDifference < 0) {
-          const extraPaid = Math.abs(netDifference);
-          if (extraPaid > newBalance) {
-            const excessAdvance = extraPaid - newBalance;
-            newBalance = 0;
-            newAdvance += excessAdvance;
-
-            // Ledger entry for advance created during sale overpayment
-            const saleAdvLedgerRef = doc(collection(db, 'ledger_entries'));
-            const saleAdvEntry: LedgerEntry = {
-              id: saleAdvLedgerRef.id,
-              entityId: newSale.customerId,
-              entityType: 'customer',
-              date: now,
-              transactionType: 'payment_received',
-              referenceId: id,
-              referenceNumber: invoiceNumber,
-              description: `Customer Advance Saved: Rs. ${excessAdvance.toLocaleString()} from overpayment on POS Bill ${invoiceNumber}`,
-              debit: excessAdvance,
-              credit: 0,
-              createdAt: now
-            };
-            batch.set(saleAdvLedgerRef, saleAdvEntry);
-          } else {
-            newBalance -= extraPaid;
+          const serverStock = (snap.data() as Part).stock ?? 0;
+          if (item.quantity <= 0) {
+            insufficientItems.push(`${item.name} (invalid quantity: ${item.quantity})`);
+          } else if (serverStock < item.quantity) {
+            insufficientItems.push(`${item.name} (requested: ${item.quantity}, available: ${serverStock})`);
           }
         }
 
-        batch.update(customerRef, {
-          balance: newBalance,
-          advance: newAdvance
-        });
-      }
+        if (insufficientItems.length > 0) {
+          throw new Error(`Insufficient stock for:\n• ${insufficientItems.join('\n• ')}\n\nSale rejected. No changes were made.`);
+        }
 
-      // Add Ledger Entry
-      const ledgerRef = doc(collection(db, 'ledger_entries'));
-      const ledgerEntry: LedgerEntry = {
-        id: ledgerRef.id,
-        entityId: newSale.customerId,
-        entityType: 'customer',
-        date: now,
-        transactionType: 'sale',
-        referenceId: id,
-        referenceNumber: invoiceNumber,
-        description: `POS Bill: ${newSale.items.length} items sold`,
-        debit: newSale.totalAmount - newSale.discount,
-        credit: newSale.paidAmount,
-        createdAt: now
-      };
-      batch.set(ledgerRef, ledgerEntry);
-    }
+        // ── Phase 5: Build and write sale document ────────────────────────────
+        const newSale: Sale = {
+          ...saleData,
+          id,
+          invoiceNumber,
+          createdAt: now
+        };
+        txn.set(saleRef, newSale);
+        completedSale = newSale;
 
-    addAuditLog(batch, 'CREATE_SALE', `POS Sale generated: ${invoiceNumber}. Total: Rs. ${newSale.totalAmount}, Paid: Rs. ${newSale.paidAmount}, Balance Credit: Rs. ${newSale.balanceAmount} for customer: ${newSale.customerName}`);
+        // ── Phase 6: Deduct stock atomically using server-validated values ────
+        for (let i = 0; i < saleData.items.length; i++) {
+          const item = saleData.items[i];
+          const snap = partDocs[i];
+          const serverStock = (snap.data() as Part).stock;
+          const partRef = doc(db, 'parts', item.partId);
 
-    try {
-      await batch.commit();
-      return newSale;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `sales/${id}`);
+          // Use the server-read stock value, not client cache
+          txn.update(partRef, {
+            stock: serverStock - item.quantity,
+            updatedAt: now
+          });
+
+          // Adjustment log
+          txn.set(adjRefs[i], {
+            id: adjRefs[i].id,
+            partId: item.partId,
+            partName: item.name,
+            type: 'sale',
+            quantity: item.quantity,
+            price: item.retailPrice,
+            referenceId: invoiceNumber,
+            reason: `Sold via POS Invoice ${invoiceNumber}`,
+            createdAt: now
+          } as Adjustment);
+        }
+
+        // ── Phase 7: Customer balance & ledger ───────────────────────────────
+        if (saleData.customerId !== 'CASH-CUSTOMER' && custSnap && custSnap.exists()) {
+          const custData = custSnap.data() as Customer;
+          let newBalance = Number(custData.balance) || 0;
+          let newAdvance = Number(custData.advance) || 0;
+          const customerRef = doc(db, 'customers', saleData.customerId);
+
+          const netPayable = newSale.totalAmount - newSale.discount;
+          const netDifference = netPayable - newSale.paidAmount;
+
+          if (netDifference > 0) {
+            const advanceToAdjust = Math.min(newAdvance, netDifference);
+            if (advanceToAdjust > 0) {
+              newAdvance -= advanceToAdjust;
+              newBalance += netDifference - advanceToAdjust;
+              txn.set(adjLedgerRef, {
+                id: adjLedgerRef.id,
+                entityId: saleData.customerId,
+                entityType: 'customer',
+                date: now,
+                transactionType: 'payment_received',
+                referenceId: id,
+                referenceNumber: invoiceNumber,
+                description: `Advance Balance Applied: Rs. ${advanceToAdjust} applied to POS Bill ${invoiceNumber}`,
+                debit: 0,
+                credit: advanceToAdjust,
+                createdAt: now
+              } as LedgerEntry);
+            } else {
+              newBalance += netDifference;
+            }
+          } else if (netDifference < 0) {
+            const extraPaid = Math.abs(netDifference);
+            if (extraPaid > newBalance) {
+              const excessAdvance = extraPaid - newBalance;
+              newBalance = 0;
+              newAdvance += excessAdvance;
+              txn.set(saleAdvLedgerRef, {
+                id: saleAdvLedgerRef.id,
+                entityId: saleData.customerId,
+                entityType: 'customer',
+                date: now,
+                transactionType: 'payment_received',
+                referenceId: id,
+                referenceNumber: invoiceNumber,
+                description: `Customer Advance Saved: Rs. ${excessAdvance.toLocaleString()} from overpayment on POS Bill ${invoiceNumber}`,
+                debit: excessAdvance,
+                credit: 0,
+                createdAt: now
+              } as LedgerEntry);
+            } else {
+              newBalance -= extraPaid;
+            }
+          }
+
+          txn.update(customerRef, { balance: newBalance, advance: newAdvance });
+
+          txn.set(ledgerRef, {
+            id: ledgerRef.id,
+            entityId: saleData.customerId,
+            entityType: 'customer',
+            date: now,
+            transactionType: 'sale',
+            referenceId: id,
+            referenceNumber: invoiceNumber,
+            description: `POS Bill: ${newSale.items.length} items sold`,
+            debit: newSale.totalAmount - newSale.discount,
+            credit: newSale.paidAmount,
+            createdAt: now
+          } as LedgerEntry);
+        }
+
+        // ── Phase 8: Audit log ────────────────────────────────────────────────
+        const userEmail = auth.currentUser?.email || 'Unknown User';
+        txn.set(auditRef, {
+          id: auditRef.id,
+          userEmail,
+          action: 'CREATE_SALE',
+          details: `POS Sale generated: ${invoiceNumber}. Total: Rs. ${newSale.totalAmount}, Paid: Rs. ${newSale.paidAmount}, Balance Credit: Rs. ${newSale.balanceAmount} for customer: ${newSale.customerName}`,
+          createdAt: now
+        } as AuditLog);
+      });
+    } catch (err: any) {
+      // Re-throw with the original message (stock validation errors have user-friendly text)
+      console.error('createSale transaction failed:', err);
       throw err;
     }
+
+    return completedSale!;
   };
 
-  // Sales Return
+  // Sales Return — uses atomic increment() for stock restoration so concurrent ops accumulate correctly.
+  // Customer balance adjustment uses a runTransaction to read the latest balance server-side.
   const returnSale = async (saleId: string, returnedItems: { partId: string; quantity: number }[], refundAmount: number) => {
-    const batch = writeBatch(db);
-    const saleRef = doc(db, 'sales', saleId);
+    // Offline guard: server reads required for customer balance transaction
+    if (!navigator.onLine) {
+      throw new Error('You are offline. Please reconnect to process the sales return.');
+    }
+
     const originalSale = sales.find(s => s.id === saleId);
     if (!originalSale) return;
 
     const now = new Date().toISOString();
 
-    // Revert/increase stock for returned parts, log adjustments
-    returnedItems.forEach((retItem) => {
-      const partRef = doc(db, 'parts', retItem.partId);
-      const currentPart = parts.find(p => p.id === retItem.partId);
-      if (currentPart) {
-        batch.update(partRef, {
-          stock: currentPart.stock + retItem.quantity,
-          updatedAt: now
-        });
-      }
+    // Pre-allocate doc refs outside transaction for stable IDs
+    const saleRef = doc(db, 'sales', saleId);
+    const adjRefs = returnedItems.map(() => doc(collection(db, 'adjustments')));
+    const auditRef = doc(collection(db, 'audit_logs'));
+    const ledgerRef = doc(collection(db, 'ledger_entries'));
 
-      const adjRef = doc(collection(db, 'adjustments'));
-      const adjustment: Adjustment = {
-        id: adjRef.id,
+    // Use a batch for the parts stock increments + adjustment logs + sale status
+    // (increment() is safe without a transaction for stock addition — it accumulates atomically)
+    const batch = writeBatch(db);
+
+    // Atomically increment stock for each returned part
+    returnedItems.forEach((retItem, i) => {
+      const partRef = doc(db, 'parts', retItem.partId);
+      // increment() uses server-side arithmetic — safe under concurrent writes
+      batch.update(partRef, {
+        stock: increment(retItem.quantity),
+        updatedAt: now
+      });
+
+      const currentPart = parts.find(p => p.id === retItem.partId);
+      batch.set(adjRefs[i], {
+        id: adjRefs[i].id,
         partId: retItem.partId,
         partName: currentPart?.name || 'Returned Part',
         type: 'sales_return',
@@ -763,8 +1117,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         referenceId: originalSale.invoiceNumber,
         reason: `Returned from Sales Invoice ${originalSale.invoiceNumber}`,
         createdAt: now
-      };
-      batch.set(adjRef, adjustment);
+      } as Adjustment);
     });
 
     // Update sale status
@@ -773,14 +1126,16 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: now
     });
 
-    // Revert/deduct customer balance if customer has outstanding balance
+    // Customer balance: use runTransaction to read latest server balance
     if (originalSale.customerId !== 'CASH-CUSTOMER' && refundAmount > 0) {
-      const customerRef = doc(db, 'customers', originalSale.customerId);
-      const currentCust = customers.find(c => c.id === originalSale.customerId);
-      if (currentCust) {
-        const currentBal = Number(currentCust.balance) || 0;
+      await runTransaction(db, async (txn) => {
+        const custSnap = await txn.get(doc(db, 'customers', originalSale.customerId));
+        if (!custSnap.exists()) return;
+
+        const custData = custSnap.data() as Customer;
+        const currentBal = Number(custData.balance) || 0;
         let newBalance = currentBal;
-        let newAdvance = Number(currentCust.advance) || 0;
+        let newAdvance = Number(custData.advance) || 0;
 
         if (refundAmount > currentBal) {
           const extraRefund = refundAmount - currentBal;
@@ -790,69 +1145,160 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           newBalance -= refundAmount;
         }
 
-        batch.update(customerRef, {
+        txn.update(doc(db, 'customers', originalSale.customerId), {
           balance: newBalance,
           advance: newAdvance
         });
-      }
 
-      // Add Ledger Entry for Return
-      const ledgerRef = doc(collection(db, 'ledger_entries'));
-      const ledgerEntry: LedgerEntry = {
-        id: ledgerRef.id,
-        entityId: originalSale.customerId,
-        entityType: 'customer',
-        date: now,
-        transactionType: 'sales_return',
-        referenceId: saleId,
-        referenceNumber: originalSale.invoiceNumber,
-        description: `Sales Return: Returned ${returnedItems.length} items`,
-        debit: 0,
-        credit: refundAmount,
+        txn.set(ledgerRef, {
+          id: ledgerRef.id,
+          entityId: originalSale.customerId,
+          entityType: 'customer',
+          date: now,
+          transactionType: 'sales_return',
+          referenceId: saleId,
+          referenceNumber: originalSale.invoiceNumber,
+          description: `Sales Return: Returned ${returnedItems.length} items`,
+          debit: 0,
+          credit: refundAmount,
+          createdAt: now
+        } as LedgerEntry);
+
+        const userEmail = auth.currentUser?.email || 'Unknown User';
+        txn.set(auditRef, {
+          id: auditRef.id,
+          userEmail,
+          action: 'SALE_RETURN',
+          details: `Returned sale invoice ${originalSale.invoiceNumber}. Returned parts count: ${returnedItems.length}, Balance Adjustment Rs. ${refundAmount}`,
+          createdAt: now
+        } as AuditLog);
+      });
+    } else {
+      // No customer balance to update — write audit log in the batch
+      const userEmail = auth.currentUser?.email || 'Unknown User';
+      batch.set(auditRef, {
+        id: auditRef.id,
+        userEmail,
+        action: 'SALE_RETURN',
+        details: `Returned sale invoice ${originalSale.invoiceNumber}. Returned parts count: ${returnedItems.length}, Balance Adjustment Rs. ${refundAmount}`,
         createdAt: now
-      };
-      batch.set(ledgerRef, ledgerEntry);
+      } as AuditLog);
     }
-
-    addAuditLog(batch, 'SALE_RETURN', `Returned sale invoice ${originalSale.invoiceNumber}. Returned parts count: ${returnedItems.length}, Balance Adjustment Rs. ${refundAmount}`);
 
     try {
       await batch.commit();
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `sales/${saleId}`);
+      throw err;
     }
   };
 
   // 5. PURCHASES Actions
   const createPurchase = async (purchaseData: Omit<Purchase, 'id' | 'createdAt' | 'invoiceNumber'>) => {
-    const batch = writeBatch(db);
+    // Offline guard: supplier balance uses server-read values
+    if (!navigator.onLine) {
+      throw new Error('You are offline. Please reconnect to record the purchase. Stock cannot be updated without a server connection.');
+    }
+
     const purchaseRef = doc(collection(db, 'purchases'));
     const id = purchaseRef.id;
     const now = new Date().toISOString();
-    
-    const totalPurchasesCount = purchases.length;
-    const invoiceNumber = `PUR-MT-${5000 + totalPurchasesCount + 1}`;
 
-    const newPurchase: Purchase = {
-      ...purchaseData,
-      id,
-      invoiceNumber,
-      createdAt: now
-    };
+    // invoiceNumber is allocated atomically inside the transaction below
+    // minValue 5001 preserves the existing PUR-MT-5001 starting point
+    let invoiceNumber = '';
+    let newPurchase: Purchase;
 
-    batch.set(purchaseRef, newPurchase);
+    // Run supplier-balance + invoice-number allocation together in one transaction
+    await runTransaction(db, async (txn) => {
+      // ── Step 1: Read supplier data first ─────────────────────────────────────
+      const suppRef = doc(db, 'suppliers', purchaseData.supplierId);
+      const snap = await txn.get(suppRef);
+      if (!snap.exists()) return;
 
-    // Increase stock for each item, add inventory adjustment logs
-    newPurchase.items.forEach((item) => {
-      const partRef = doc(db, 'parts', item.partId);
-      const currentPart = parts.find(p => p.id === item.partId);
-      if (currentPart) {
-        batch.update(partRef, {
-          stock: currentPart.stock + item.quantity,
-          purchasePrice: item.purchasePrice, // Automatically updates purchase price to last purchase price!
-          updatedAt: now
-        });
+      const suppData = snap.data() as Supplier;
+      let newBalance = Number(suppData.balance) || 0;
+      let newAdvance = Number(suppData.advance) || 0;
+
+      // ── Step 2: Allocate atomic purchase invoice number (after reads) ─────────
+      const seqNum = await allocateSequence(txn, 'purchaseInvoice', 5001);
+      invoiceNumber = `PUR-MT-${seqNum}`;
+
+      newPurchase = {
+        ...purchaseData,
+        id,
+        invoiceNumber,
+        createdAt: now
+      };
+
+      // ── Step 3: Supplier balance calculations ────────────────────────────────
+      const netPayable = newPurchase.totalAmount;
+      const netDifference = netPayable - newPurchase.paidAmount;
+
+      const extraLedgerRef = doc(collection(db, 'ledger_entries'));
+
+      if (netDifference > 0) {
+        const advanceToAdjust = Math.min(newAdvance, netDifference);
+        if (advanceToAdjust > 0) {
+          newAdvance -= advanceToAdjust;
+          newBalance += netDifference - advanceToAdjust;
+          txn.set(extraLedgerRef, {
+            id: extraLedgerRef.id,
+            entityId: newPurchase.supplierId,
+            entityType: 'supplier',
+            date: now,
+            transactionType: 'payment_sent',
+            referenceId: id,
+            referenceNumber: invoiceNumber,
+            description: `Advance Balance Applied: Rs. ${advanceToAdjust} applied to Supplier Invoice ${invoiceNumber}`,
+            debit: advanceToAdjust,
+            credit: 0,
+            createdAt: now
+          } as LedgerEntry);
+        } else {
+          newBalance += netDifference;
+        }
+      } else if (netDifference < 0) {
+        const extraPaid = Math.abs(netDifference);
+        if (extraPaid > newBalance) {
+          const excessAdvance = extraPaid - newBalance;
+          newBalance = 0;
+          newAdvance += excessAdvance;
+          txn.set(extraLedgerRef, {
+            id: extraLedgerRef.id,
+            entityId: newPurchase.supplierId,
+            entityType: 'supplier',
+            date: now,
+            transactionType: 'payment_sent',
+            referenceId: id,
+            referenceNumber: invoiceNumber,
+            description: `Supplier Advance Saved: Rs. ${excessAdvance.toLocaleString()} from overpayment on Invoice ${invoiceNumber}`,
+            debit: 0,
+            credit: excessAdvance,
+            createdAt: now
+          } as LedgerEntry);
+        } else {
+          newBalance -= extraPaid;
+        }
       }
+
+      txn.update(suppRef, { balance: newBalance, advance: newAdvance });
+    });
+
+    // After transaction committed: write the rest of the purchase in a batch
+    const batch = writeBatch(db);
+
+    batch.set(purchaseRef, newPurchase!);
+
+    // Atomically increment stock for each item using server-side increment()
+    // This accumulates correctly under concurrent purchases — no stale-read overwrite risk.
+    newPurchase!.items.forEach((item) => {
+      const partRef = doc(db, 'parts', item.partId);
+      batch.update(partRef, {
+        stock: increment(item.quantity),       // atomic server-side addition
+        purchasePrice: item.purchasePrice,     // updates purchase price to latest
+        updatedAt: now
+      });
 
       const adjRef = doc(collection(db, 'adjustments'));
       const adjustment: Adjustment = {
@@ -869,205 +1315,174 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       batch.set(adjRef, adjustment);
     });
 
-    // Update supplier ledger balance if credit purchase
-    const supplierRef = doc(db, 'suppliers', newPurchase.supplierId);
-    const currentSupp = suppliers.find(s => s.id === newPurchase.supplierId);
-    if (currentSupp) {
-      let newBalance = Number(currentSupp.balance) || 0;
-      let newAdvance = Number(currentSupp.advance) || 0;
-
-      const netPayable = newPurchase.totalAmount;
-      const netDifference = netPayable - newPurchase.paidAmount;
-
-      if (netDifference > 0) {
-        const advanceToAdjust = Math.min(newAdvance, netDifference);
-        if (advanceToAdjust > 0) {
-          newAdvance -= advanceToAdjust;
-          const remainingBalanceAmount = netDifference - advanceToAdjust;
-          newBalance += remainingBalanceAmount;
-
-          // Add Ledger Entry for Advance Adjustment
-          const adjLedgerRef = doc(collection(db, 'ledger_entries'));
-          const adjLedgerEntry: LedgerEntry = {
-            id: adjLedgerRef.id,
-            entityId: newPurchase.supplierId,
-            entityType: 'supplier',
-            date: now,
-            transactionType: 'payment_sent',
-            referenceId: id,
-            referenceNumber: invoiceNumber,
-            description: `Advance Balance Applied: Rs. ${advanceToAdjust} applied to Supplier Invoice ${invoiceNumber}`,
-            debit: advanceToAdjust,
-            credit: 0,
-            createdAt: now
-          };
-          batch.set(adjLedgerRef, adjLedgerEntry);
-        } else {
-          newBalance += netDifference;
-        }
-      } else if (netDifference < 0) {
-        const extraPaid = Math.abs(netDifference);
-        if (extraPaid > newBalance) {
-          const excessAdvance = extraPaid - newBalance;
-          newBalance = 0;
-          newAdvance += excessAdvance;
-
-          // Ledger entry for supplier advance created during purchase overpayment
-          const purAdvLedgerRef = doc(collection(db, 'ledger_entries'));
-          const purAdvEntry: LedgerEntry = {
-            id: purAdvLedgerRef.id,
-            entityId: newPurchase.supplierId,
-            entityType: 'supplier',
-            date: now,
-            transactionType: 'payment_sent',
-            referenceId: id,
-            referenceNumber: invoiceNumber,
-            description: `Supplier Advance Saved: Rs. ${excessAdvance.toLocaleString()} from overpayment on Invoice ${invoiceNumber}`,
-            debit: 0,
-            credit: excessAdvance,
-            createdAt: now
-          };
-          batch.set(purAdvLedgerRef, purAdvEntry);
-        } else {
-          newBalance -= extraPaid;
-        }
-      }
-
-      batch.update(supplierRef, {
-        balance: newBalance,
-        advance: newAdvance
-      });
-    }
-
-    // Add Ledger Entry for Supplier purchase
+    // Add main Ledger Entry for Supplier purchase (outside inner transaction, in batch)
     const ledgerRef = doc(collection(db, 'ledger_entries'));
     const ledgerEntry: LedgerEntry = {
       id: ledgerRef.id,
-      entityId: newPurchase.supplierId,
+      entityId: newPurchase!.supplierId,
       entityType: 'supplier',
       date: now,
       transactionType: 'purchase',
       referenceId: id,
       referenceNumber: invoiceNumber,
-      description: `Stock Restocked: ${newPurchase.items.length} items received`,
-      debit: newPurchase.paidAmount,
-      credit: newPurchase.totalAmount,
+      description: `Stock Restocked: ${newPurchase!.items.length} items received`,
+      debit: newPurchase!.paidAmount,
+      credit: newPurchase!.totalAmount,
       createdAt: now
     };
     batch.set(ledgerRef, ledgerEntry);
 
-    addAuditLog(batch, 'CREATE_PURCHASE', `Purchase invoice recorded: ${invoiceNumber}. Total: Rs. ${newPurchase.totalAmount}, Paid: Rs. ${newPurchase.paidAmount}, Credit Balance: Rs. ${newPurchase.balanceAmount} for supplier: ${newPurchase.supplierName}`);
+    addAuditLog(batch, 'CREATE_PURCHASE', `Purchase invoice recorded: ${invoiceNumber}. Total: Rs. ${newPurchase!.totalAmount}, Paid: Rs. ${newPurchase!.paidAmount}, Credit Balance: Rs. ${newPurchase!.balanceAmount} for supplier: ${newPurchase!.supplierName}`);
 
     try {
       await batch.commit();
-      return newPurchase;
+      return newPurchase!;
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `purchases/${id}`);
       throw err;
     }
   };
 
-  // Purchase Return
+  // Purchase Return — uses runTransaction to validate server stock before deduction.
+  // Prevents stock going negative if concurrent writes already consumed the stock.
   const returnPurchase = async (purchaseId: string, returnedItems: { partId: string; quantity: number }[], refundAmount: number) => {
-    const batch = writeBatch(db);
-    const purchaseRef = doc(db, 'purchases', purchaseId);
+    // Offline guard
+    if (!navigator.onLine) {
+      throw new Error('You are offline. Please reconnect to process the purchase return. Stock cannot be validated without a server connection.');
+    }
+
     const originalPurchase = purchases.find(p => p.id === purchaseId);
     if (!originalPurchase) return;
 
     const now = new Date().toISOString();
 
-    // Revert/decrease stock for returned parts, log adjustments
-    returnedItems.forEach((retItem) => {
-      const partRef = doc(db, 'parts', retItem.partId);
-      const currentPart = parts.find(p => p.id === retItem.partId);
-      if (currentPart) {
-        batch.update(partRef, {
-          stock: Math.max(0, currentPart.stock - retItem.quantity),
-          updatedAt: now
-        });
-      }
-
-      const adjRef = doc(collection(db, 'adjustments'));
-      const adjustment: Adjustment = {
-        id: adjRef.id,
-        partId: retItem.partId,
-        partName: currentPart?.name || 'Returned Part',
-        type: 'purchase_return',
-        quantity: retItem.quantity,
-        price: currentPart?.purchasePrice || 0,
-        referenceId: originalPurchase.invoiceNumber,
-        reason: `Returned to Supplier on Purchase Invoice ${originalPurchase.invoiceNumber}`,
-        createdAt: now
-      };
-      batch.set(adjRef, adjustment);
-    });
-
-    // Update purchase status
-    batch.update(purchaseRef, {
-      status: 'returned',
-      updatedAt: now
-    });
-
-    // Revert/deduct supplier balance
-    if (refundAmount > 0) {
-      const supplierRef = doc(db, 'suppliers', originalPurchase.supplierId);
-      const currentSupp = suppliers.find(s => s.id === originalPurchase.supplierId);
-      if (currentSupp) {
-        const currentBal = Number(currentSupp.balance) || 0;
-        let newBalance = currentBal;
-        let newAdvance = Number(currentSupp.advance) || 0;
-
-        if (refundAmount > currentBal) {
-          const extraRefund = refundAmount - currentBal;
-          newBalance = 0;
-          newAdvance += extraRefund;
-        } else {
-          newBalance -= refundAmount;
-        }
-
-        batch.update(supplierRef, {
-          balance: newBalance,
-          advance: newAdvance
-        });
-      }
-
-      // Add Ledger Entry for Supplier Return
-      const ledgerRef = doc(collection(db, 'ledger_entries'));
-      const ledgerEntry: LedgerEntry = {
-        id: ledgerRef.id,
-        entityId: originalPurchase.supplierId,
-        entityType: 'supplier',
-        date: now,
-        transactionType: 'purchase_return',
-        referenceId: purchaseId,
-        referenceNumber: originalPurchase.invoiceNumber,
-        description: `Purchase Return: Returned ${returnedItems.length} items`,
-        debit: refundAmount,
-        credit: 0,
-        createdAt: now
-      };
-      batch.set(ledgerRef, ledgerEntry);
-    }
-
-    addAuditLog(batch, 'PURCHASE_RETURN', `Returned purchase invoice ${originalPurchase.invoiceNumber}. Returned parts count: ${returnedItems.length}, Balance Adjustment Rs. ${refundAmount}`);
+    // Pre-allocate refs outside the transaction for stable IDs
+    const purchaseRef = doc(db, 'purchases', purchaseId);
+    const adjRefs = returnedItems.map(() => doc(collection(db, 'adjustments')));
+    const auditRef = doc(collection(db, 'audit_logs'));
+    const ledgerRef = doc(collection(db, 'ledger_entries'));
 
     try {
-      await batch.commit();
+      await runTransaction(db, async (txn) => {
+        // ── Phase 1: Read latest server stock for every returned item ────────
+        const partDocs = await Promise.all(
+          returnedItems.map(ri => txn.get(doc(db, 'parts', ri.partId)))
+        );
+
+        // ── Phase 2: Validate — server stock must be >= qty to return ────────
+        const insufficientItems: string[] = [];
+        for (let i = 0; i < returnedItems.length; i++) {
+          const ri = returnedItems[i];
+          const snap = partDocs[i];
+          if (!snap.exists()) {
+            insufficientItems.push(`Part ID ${ri.partId} not found in database`);
+            continue;
+          }
+          const serverStock = (snap.data() as Part).stock ?? 0;
+          if (serverStock < ri.quantity) {
+            const partName = (snap.data() as Part).name || ri.partId;
+            insufficientItems.push(`${partName} (trying to return ${ri.quantity}, but only ${serverStock} in stock — already sold/adjusted?)`);
+          }
+        }
+
+        if (insufficientItems.length > 0) {
+          throw new Error(`Cannot complete purchase return — insufficient stock:\n• ${insufficientItems.join('\n• ')}\n\nReturn rejected. No changes were made.`);
+        }
+
+        // ── Phase 3: Deduct stock atomically ─────────────────────────────────
+        for (let i = 0; i < returnedItems.length; i++) {
+          const ri = returnedItems[i];
+          const snap = partDocs[i];
+          const serverStock = (snap.data() as Part).stock;
+          const currentPart = snap.data() as Part;
+
+          txn.update(doc(db, 'parts', ri.partId), {
+            stock: serverStock - ri.quantity,
+            updatedAt: now
+          });
+
+          txn.set(adjRefs[i], {
+            id: adjRefs[i].id,
+            partId: ri.partId,
+            partName: currentPart.name || 'Returned Part',
+            type: 'purchase_return',
+            quantity: ri.quantity,
+            price: currentPart.purchasePrice || 0,
+            referenceId: originalPurchase.invoiceNumber,
+            reason: `Returned to Supplier on Purchase Invoice ${originalPurchase.invoiceNumber}`,
+            createdAt: now
+          } as Adjustment);
+        }
+
+        // ── Phase 4: Update purchase status ──────────────────────────────────
+        txn.update(purchaseRef, { status: 'returned', updatedAt: now });
+
+        // ── Phase 5: Supplier balance ─────────────────────────────────────────
+        if (refundAmount > 0) {
+          const suppSnap = await txn.get(doc(db, 'suppliers', originalPurchase.supplierId));
+          if (suppSnap.exists()) {
+            const suppData = suppSnap.data() as Supplier;
+            const currentBal = Number(suppData.balance) || 0;
+            let newBalance = currentBal;
+            let newAdvance = Number(suppData.advance) || 0;
+
+            if (refundAmount > currentBal) {
+              const extraRefund = refundAmount - currentBal;
+              newBalance = 0;
+              newAdvance += extraRefund;
+            } else {
+              newBalance -= refundAmount;
+            }
+
+            txn.update(doc(db, 'suppliers', originalPurchase.supplierId), {
+              balance: newBalance,
+              advance: newAdvance
+            });
+          }
+
+          txn.set(ledgerRef, {
+            id: ledgerRef.id,
+            entityId: originalPurchase.supplierId,
+            entityType: 'supplier',
+            date: now,
+            transactionType: 'purchase_return',
+            referenceId: purchaseId,
+            referenceNumber: originalPurchase.invoiceNumber,
+            description: `Purchase Return: Returned ${returnedItems.length} items`,
+            debit: refundAmount,
+            credit: 0,
+            createdAt: now
+          } as LedgerEntry);
+        }
+
+        // ── Phase 6: Audit log ────────────────────────────────────────────────
+        const userEmail = auth.currentUser?.email || 'Unknown User';
+        txn.set(auditRef, {
+          id: auditRef.id,
+          userEmail,
+          action: 'PURCHASE_RETURN',
+          details: `Returned purchase invoice ${originalPurchase.invoiceNumber}. Returned parts count: ${returnedItems.length}, Balance Adjustment Rs. ${refundAmount}`,
+          createdAt: now
+        } as AuditLog);
+      });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `purchases/${purchaseId}`);
+      throw err;
     }
   };
 
   const recordCustomerPayment = async (paymentData: Omit<Payment, 'id' | 'voucherNumber' | 'entityType' | 'recordedBy' | 'createdAt'>) => {
-    const batch = writeBatch(db);
     const paymentRef = doc(collection(db, 'payments'));
     const id = paymentRef.id;
     const now = new Date().toISOString();
     const userEmail = auth.currentUser?.email || 'Unknown User';
 
-    // Generate Voucher Number: REC-000001
-    const paymentsCount = payments.length;
-    const voucherNumber = `REC-${String(100000 + paymentsCount + 1).padStart(6, '0')}`;
+    // Allocate atomic voucher number: REC-100001, REC-100002, ...
+    // minValue 100001 preserves the existing format; counter seeded above existing max on first use.
+    const seqNum = await runTransaction(db, async (txn) => allocateSequence(txn, 'customerReceipt', 100001));
+    const voucherNumber = `REC-${String(seqNum).padStart(6, '0')}`;
+
+    const batch = writeBatch(db);
 
     const newPayment: Payment = {
       ...paymentData,
@@ -1150,15 +1565,17 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const recordSupplierPayment = async (paymentData: Omit<Payment, 'id' | 'voucherNumber' | 'entityType' | 'recordedBy' | 'createdAt'>) => {
-    const batch = writeBatch(db);
     const paymentRef = doc(collection(db, 'payments'));
     const id = paymentRef.id;
     const now = new Date().toISOString();
     const userEmail = auth.currentUser?.email || 'Unknown User';
 
-    // Generate Voucher Number: PAY-000001
-    const paymentsCount = payments.length;
-    const voucherNumber = `PAY-${String(100000 + paymentsCount + 1).padStart(6, '0')}`;
+    // Allocate atomic voucher number: PAY-100001, PAY-100002, ...
+    // minValue 100001 preserves the existing format; counter seeded above existing max on first use.
+    const seqNum = await runTransaction(db, async (txn) => allocateSequence(txn, 'supplierPayment', 100001));
+    const voucherNumber = `PAY-${String(seqNum).padStart(6, '0')}`;
+
+    const batch = writeBatch(db);
 
     const newPayment: Payment = {
       ...paymentData,
@@ -1241,40 +1658,78 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // 6. INVENTORY MANUAL ADJUSTMENT Action
+  // Positive (add): uses atomic increment() — safe under concurrent writes.
+  // Negative (subtract): uses runTransaction() to read server stock, reject if it would go negative.
   const addAdjustment = async (adjData: Omit<Adjustment, 'id' | 'createdAt'>) => {
-    const batch = writeBatch(db);
-    const adjRef = doc(collection(db, 'adjustments'));
-    const partRef = doc(db, 'parts', adjData.partId);
-    const part = parts.find(p => p.id === adjData.partId);
-    
-    if (!part) return;
+    // Offline guard for negative adjustments (require server validation)
+    const isAdding = adjData.type === 'adjustment_add';
+    if (!isAdding && !navigator.onLine) {
+      throw new Error('You are offline. Please reconnect to perform a stock deduction. Stock cannot be validated without a server connection.');
+    }
 
     const now = new Date().toISOString();
-    const isAdding = adjData.type === 'adjustment_add';
-    const updatedStock = isAdding 
-      ? part.stock + adjData.quantity 
-      : Math.max(0, part.stock - adjData.quantity);
+    const adjRef = doc(collection(db, 'adjustments'));
+    const partRef = doc(db, 'parts', adjData.partId);
+    const auditRef = doc(collection(db, 'audit_logs'));
+    const userEmail = auth.currentUser?.email || 'Unknown User';
 
-    // Save adjustment log
     const adjustment: Adjustment = {
       ...adjData,
       id: adjRef.id,
       createdAt: now
     };
-    batch.set(adjRef, adjustment);
 
-    // Update part stock
-    batch.update(partRef, {
-      stock: updatedStock,
-      updatedAt: now
-    });
+    if (isAdding) {
+      // ── Positive adjustment: batch with atomic increment ─────────────────
+      const batch = writeBatch(db);
+      batch.set(adjRef, adjustment);
+      batch.update(partRef, {
+        stock: increment(adjData.quantity),
+        updatedAt: now
+      });
+      batch.set(auditRef, {
+        id: auditRef.id,
+        userEmail,
+        action: 'MANUAL_STOCK_ADJUSTMENT',
+        details: `Manual stock adjustment for ${adjData.partName}: +${adjData.quantity} units. Reason: ${adjData.reason}`,
+        createdAt: now
+      } as AuditLog);
+      try {
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `adjustments/${adjRef.id}`);
+        throw err;
+      }
+    } else {
+      // ── Negative adjustment: runTransaction to validate server stock ─────
+      try {
+        await runTransaction(db, async (txn) => {
+          const partSnap = await txn.get(partRef);
+          if (!partSnap.exists()) {
+            throw new Error(`Part not found in database.`);
+          }
+          const serverStock = (partSnap.data() as Part).stock ?? 0;
+          if (serverStock < adjData.quantity) {
+            throw new Error(`Insufficient stock. Requested deduction: ${adjData.quantity}, Available: ${serverStock}. Adjustment rejected.`);
+          }
 
-    addAuditLog(batch, 'MANUAL_STOCK_ADJUSTMENT', `Manual stock adjustment for ${part.name}: ${isAdding ? '+' : '-'}${adjData.quantity} units. New stock: ${updatedStock}. Reason: ${adjData.reason}`);
-
-    try {
-      await batch.commit();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `adjustments/${adjRef.id}`);
+          txn.set(adjRef, adjustment);
+          txn.update(partRef, {
+            stock: serverStock - adjData.quantity,
+            updatedAt: now
+          });
+          txn.set(auditRef, {
+            id: auditRef.id,
+            userEmail,
+            action: 'MANUAL_STOCK_ADJUSTMENT',
+            details: `Manual stock adjustment for ${adjData.partName}: -${adjData.quantity} units (server stock was ${serverStock}). Reason: ${adjData.reason}`,
+            createdAt: now
+          } as AuditLog);
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `adjustments/${adjRef.id}`);
+        throw err;
+      }
     }
   };
 
@@ -1550,7 +2005,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Set settings
     const settingsRef = doc(db, 'settings', 'shop');
     batch.set(settingsRef, {
-      shopName: 'Bismillah Autos & Spare Parts',
+      shopName: 'BIN ADAM TRADERS',
       phone: '0300-1234567',
       address: 'McLeod Road, Lahore, Pakistan',
       currency: 'Rs.',
@@ -1584,22 +2039,37 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         'partners',
         'drawings',
         'payments',
-        'ledger_entries'
+        'ledger_entries',
+        'counters'
       ];
 
-      const deletePromises: Promise<void>[] = [];
+      console.log('🗑️ Starting database wipe...');
+      
+      // Use batched deletion for better performance (max 500 operations per batch)
       for (const colName of collectionsToWipe) {
         const querySnapshot = await getDocs(collection(db, colName));
-        querySnapshot.forEach((docSnap) => {
-          deletePromises.push(deleteDoc(docSnap.ref));
-        });
+        const docs = querySnapshot.docs;
+        console.log(`📊 Collection '${colName}': Found ${docs.length} documents to delete`);
+        
+        // Process in batches of 500
+        for (let i = 0; i < docs.length; i += 500) {
+          const batch = writeBatch(db);
+          const chunk = docs.slice(i, i + 500);
+          chunk.forEach((docSnap) => {
+            batch.delete(docSnap.ref);
+          });
+          await batch.commit();
+          console.log(`  ✅ Deleted batch ${Math.floor(i/500) + 1} (${chunk.length} docs)`);
+        }
+        
+        // Verify deletion
+        const verifySnapshot = await getDocs(collection(db, colName));
+        console.log(`  🔍 Verification: ${verifySnapshot.docs.length} documents remaining in '${colName}'`);
       }
-
-      await Promise.all(deletePromises);
       
-      // Reset shop settings
+      // Reset shop settings to defaults
       await setDoc(doc(db, 'settings', 'shop'), {
-        shopName: 'Bismillah Autos & Spare Parts',
+        shopName: 'BIN ADAM TRADERS',
         phone: '0300-1234567',
         address: 'McLeod Road, Lahore, Pakistan',
         currency: 'Rs.',
@@ -1608,7 +2078,38 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         startingBank: 0
       });
 
-      await addManualAuditLog('CLEAR_ALL_DATA', 'Cleared all application transactions, stock catalogs, user records, and reset workspace.');
+      // Reinitialize counters to starting values
+      await setDoc(doc(db, 'counters', 'saleInvoice'), { seq: 1000 });
+      await setDoc(doc(db, 'counters', 'purchaseInvoice'), { seq: 5000 });
+      await setDoc(doc(db, 'counters', 'paymentVoucher'), { seq: 100000 });
+      await setDoc(doc(db, 'counters', 'receiptVoucher'), { seq: 100000 });
+
+      await addManualAuditLog('CLEAR_ALL_DATA', 'Cleared all application transactions, stock catalogs, user records, counters, and reset workspace to factory state.');
+      
+      // Clear Firestore offline persistence to prevent old data from reappearing
+      try {
+        await clearIndexedDbPersistence(db);
+        console.log('✅ Firestore offline persistence cleared successfully');
+      } catch (err: any) {
+        // If persistence is not enabled or already cleared, ignore error
+        if (err.code !== 'failed-precondition') {
+          console.warn('⚠️ Warning clearing offline persistence:', err.message);
+        }
+      }
+
+      // Set timestamp BEFORE clearing to force server fetch on next load
+      localStorage.setItem('database_reset_timestamp', Date.now().toString());
+      
+      // Clear ALL local storage and session storage (except the timestamp)
+      const resetTimestamp = localStorage.getItem('database_reset_timestamp');
+      localStorage.clear();
+      sessionStorage.clear();
+      
+      // Restore the timestamp
+      if (resetTimestamp) {
+        localStorage.setItem('database_reset_timestamp', resetTimestamp);
+      }
+
       setLoading(false);
     } catch (err) {
       setLoading(false);

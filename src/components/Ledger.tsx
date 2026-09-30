@@ -90,8 +90,10 @@ export const Ledger: React.FC<LedgerProps> = ({
 
   const filteredList = useMemo(() => {
     return activeList.filter(item => 
-      item.name.toLowerCase().includes(search.toLowerCase()) || 
-      item.phone.toLowerCase().includes(search.toLowerCase())
+      !item.isArchived && (
+        item.name.toLowerCase().includes(search.toLowerCase()) || 
+        item.phone.toLowerCase().includes(search.toLowerCase())
+      )
     );
   }, [activeList, search]);
 
@@ -168,7 +170,25 @@ export const Ledger: React.FC<LedgerProps> = ({
     setName(item.name);
     setPhone(item.phone);
     setOptionalField(type === 'customers' ? (item.shopName || '') : (item.address || ''));
-    setBalance(item.balance);
+
+    // Find starting balance ledger entry to populate opening balance field
+    const entityType = type === 'customers' ? 'customer' : 'supplier';
+    const openingEntry = ledgerEntries.find(
+      e => e.entityId === item.id &&
+           e.entityType === entityType &&
+           (e.transactionType === 'starting_balance' || e.referenceId === 'STARTING_BALANCE')
+    );
+
+    let startingBal = 0;
+    if (openingEntry) {
+      startingBal = type === 'customers'
+        ? ((openingEntry.debit || 0) - (openingEntry.credit || 0))
+        : ((openingEntry.credit || 0) - (openingEntry.debit || 0));
+    } else {
+      startingBal = item.balance || 0;
+    }
+
+    setBalance(startingBal);
     setIsFormOpen(true);
   };
 
@@ -665,10 +685,9 @@ export const Ledger: React.FC<LedgerProps> = ({
                 <label className="text-xs font-semibold text-slate-600 block">Starting Balance Ledger (Rs.)</label>
                 <input
                   type="number"
-                  disabled={!!editingItem} // Ledger balance is adjusted via payments for perfect double entry!
                   value={balance}
                   onChange={(e) => setBalance(Number(e.target.value))}
-                  className="w-full px-3 py-1.5 border border-slate-200 disabled:bg-slate-50 rounded-lg text-xs font-mono focus:outline-hidden"
+                  className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono focus:outline-hidden"
                 />
                 <span className="text-[10px] text-slate-400 block leading-tight">
                   {type === 'customers' 

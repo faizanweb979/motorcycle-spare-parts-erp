@@ -32,18 +32,27 @@ export const Purchases: React.FC = () => {
   const [pendingPurchasePayload, setPendingPurchasePayload] = useState<any>(null);
   const [overpaymentExcess, setOverpaymentExcess] = useState(0);
 
+  // Price warning dialog state
+  const [isPriceWarningOpen, setIsPriceWarningOpen] = useState(false);
+  const [priceWarningItems, setPriceWarningItems] = useState<any[]>([]);
+
   // History states
   const [historySearch, setHistorySearch] = useState('');
   const [selectedInvoice, setSelectedInvoice] = useState<Purchase | null>(null);
 
-  // Filter parts for search
+  // Double-submission guard
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Filter parts for search (only active non-archived parts)
   const searchedParts = useMemo(() => {
     if (!partQuery.trim()) return [];
     const query = partQuery.toLowerCase();
     return parts.filter(p => 
-      p.name.toLowerCase().includes(query) || 
-      p.partNumber.toLowerCase().includes(query) || 
-      p.brand.toLowerCase().includes(query)
+      !p.isArchived && (
+        p.name.toLowerCase().includes(query) || 
+        p.partNumber.toLowerCase().includes(query) || 
+        p.brand.toLowerCase().includes(query)
+      )
     ).slice(0, 5);
   }, [parts, partQuery]);
 
@@ -94,6 +103,26 @@ export const Purchases: React.FC = () => {
     }));
   };
 
+  // Check for price warnings (new cost exceeds retail price)
+  const checkPriceWarnings = () => {
+    const warnings: any[] = [];
+    itemsList.forEach(item => {
+      const part = parts.find(p => p.id === item.partId);
+      if (part && item.purchasePrice > part.retailPrice) {
+        warnings.push({
+          partId: item.partId,
+          partName: item.name,
+          partNumber: item.partNumber,
+          oldCost: part.purchasePrice,
+          newCost: item.purchasePrice,
+          retailPrice: part.retailPrice,
+          margin: part.retailPrice - item.purchasePrice
+        });
+      }
+    });
+    return warnings;
+  };
+
   const removeItem = (partId: string) => {
     setItemsList(itemsList.filter(item => item.partId !== partId));
   };
@@ -108,6 +137,7 @@ export const Purchases: React.FC = () => {
   // Submit Purchase
   const handleSubmitPurchase = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return; // double-submission guard
 
     if (!supplierId) {
       alert('Please select a registered supplier first.');
@@ -145,10 +175,21 @@ export const Purchases: React.FC = () => {
       return;
     }
 
+    // Price warning check: new cost exceeds retail price
+    const priceWarnings = checkPriceWarnings();
+    if (priceWarnings.length > 0) {
+      setPendingPurchasePayload(payload);
+      setPriceWarningItems(priceWarnings);
+      setIsPriceWarningOpen(true);
+      return;
+    }
+
     await submitPurchasePayload(payload);
   };
 
   const submitPurchasePayload = async (payload: any) => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     try {
       await createPurchase(payload);
       alert('Supplier purchase order processed successfully! Warehouse inventory restocked.');
@@ -156,6 +197,8 @@ export const Purchases: React.FC = () => {
       setPurchaseTab('history');
     } catch (err: any) {
       alert(`Failed to record purchase: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -169,8 +212,10 @@ export const Purchases: React.FC = () => {
 
   // Return/cancel purchase from supplier
   const handleReturnPurchase = async (purchase: Purchase) => {
+    if (isSubmitting) return;
     const confirmReturn = confirm(`Are you sure you want to return items from Supplier Invoice ${purchase.invoiceNumber}? This will deduct the returned quantities from stock and reduce outstanding supplier balance.`);
     if (confirmReturn) {
+      setIsSubmitting(true);
       try {
         const returnedItems = purchase.items.map(it => ({
           partId: it.partId,
@@ -182,8 +227,10 @@ export const Purchases: React.FC = () => {
 
         await returnPurchase(purchase.id, returnedItems, refundAmount);
         alert('Supplier purchase invoice returned. Quantities deducted from warehouse.');
-      } catch (err) {
-        alert('Return failed.');
+      } catch (err: any) {
+        alert(`Return failed: ${err.message}`);
+      } finally {
+        setIsSubmitting(false);
       }
     }
   };
@@ -327,8 +374,25 @@ export const Purchases: React.FC = () => {
                               min={0}
                               value={item.purchasePrice}
                               onChange={(e) => updatePurchasePrice(item.partId, Number(e.target.value))}
-                              className="w-24 text-right px-2 py-1 border border-slate-200 rounded font-mono text-slate-800 focus:outline-hidden"
+                              className={`w-24 text-right px-2 py-1 border rounded font-mono focus:outline-hidden ${(() => {
+                                const part = parts.find(p => p.id === item.partId);
+                                if (part && item.purchasePrice > part.retailPrice) {
+                                  return 'border-red-300 bg-red-50 text-red-900';
+                                }
+                                return 'border-slate-200 text-slate-800';
+                              })()}`}
                             />
+                            {(() => {
+                              const part = parts.find(p => p.id === item.partId);
+                              if (part && item.purchasePrice > part.retailPrice) {
+                                return (
+                                  <div className="text-[9px] text-red-600 font-bold mt-1">
+                                    ⚠️ Exceeds retail (Rs. {part.retailPrice})
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-900">
                             Rs. {(item.purchasePrice * item.quantity).toLocaleString()}
@@ -367,7 +431,7 @@ export const Purchases: React.FC = () => {
                   className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:border-blue-500"
                 >
                   <option value="">-- Choose Registered Supplier --</option>
-                  {suppliers.map(s => (
+                  {suppliers.filter(s => !s.isArchived).map(s => (
                     <option key={s.id} value={s.id}>
                       {s.name} (Outstanding: Rs. {s.balance})
                     </option>
@@ -437,11 +501,11 @@ export const Purchases: React.FC = () => {
 
               <button
                 type="submit"
-                disabled={itemsList.length === 0}
+                disabled={itemsList.length === 0 || isSubmitting}
                 className="w-full bg-slate-900 hover:bg-slate-800 active:bg-slate-950 disabled:bg-slate-100 disabled:text-slate-400 text-white font-bold py-3 rounded-xl text-xs transition-colors shadow-xs flex items-center justify-center gap-2 uppercase tracking-wider"
               >
                 <CheckCircle2 className="h-4 w-4 text-blue-500" />
-                <span>Record Supplier Purchase</span>
+                <span>{isSubmitting ? 'Processing...' : 'Record Supplier Purchase'}</span>
               </button>
             </form>
           </div>
@@ -516,7 +580,8 @@ export const Purchases: React.FC = () => {
                             {!isReturned && (
                               <button
                                 onClick={() => handleReturnPurchase(pur)}
-                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                                disabled={isSubmitting}
+                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Return Purchase Order"
                               >
                                 <CornerUpLeft className="h-3.5 w-3.5" />
@@ -643,6 +708,83 @@ export const Purchases: React.FC = () => {
                   className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-xs font-semibold"
                 >
                   Cancel & Edit Payment
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PRICE WARNING DIALOG */}
+      {isPriceWarningOpen && pendingPurchasePayload && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl border border-red-200 max-w-lg w-full overflow-hidden">
+            <div className="bg-red-900 text-white p-4 flex justify-between items-center">
+              <h3 className="text-sm font-bold flex items-center gap-2">
+                <span className="text-amber-400">⚠</span> Cost Exceeds Retail Price
+              </h3>
+              <button onClick={() => setIsPriceWarningOpen(false)} className="text-slate-400 hover:text-white">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="text-xs text-slate-600 space-y-2 leading-relaxed">
+                <p className="font-bold text-red-700">The following parts have new purchase costs that exceed their current retail selling prices:</p>
+                <div className="max-h-48 overflow-y-auto space-y-2">
+                  {priceWarningItems.map((warning, idx) => (
+                    <div key={idx} className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <p className="font-bold text-slate-800">{warning.partName}</p>
+                          <p className="text-[10px] text-slate-500 font-mono">{warning.partNumber}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-mono font-bold text-red-600">Rs. {warning.margin.toLocaleString()}</p>
+                          <p className="text-[9px] text-red-500">negative margin</p>
+                        </div>
+                      </div>
+                      <div className="flex justify-between text-[10px] font-mono">
+                        <span className="text-slate-500">Old Cost: Rs. {warning.oldCost}</span>
+                        <span className="text-slate-500">Retail: Rs. {warning.retailPrice}</span>
+                        <span className="text-red-700 font-bold">New Cost: Rs. {warning.newCost}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="font-semibold text-slate-700">You can update retail prices now or proceed with the purchase using existing prices.</p>
+              </div>
+              <div className="space-y-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPriceWarningOpen(false);
+                    // Navigate to PartsMaster to update prices (user will need to return)
+                    alert('Please update retail prices in Parts Master before completing this purchase.');
+                  }}
+                  className="w-full text-left p-3 border border-blue-200 bg-blue-50/50 hover:bg-blue-50 hover:border-blue-300 rounded-lg transition-all"
+                >
+                  <p className="text-xs font-bold text-blue-800">Update Retail Prices First (Recommended)</p>
+                  <p className="text-[10px] text-blue-600 mt-0.5">Go to Parts Master to adjust selling prices before completing purchase.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setIsPriceWarningOpen(false);
+                    await submitPurchasePayload(pendingPurchasePayload);
+                  }}
+                  className="w-full text-left p-3 border border-red-200 bg-red-50/50 hover:bg-red-50 hover:border-red-300 rounded-lg transition-all"
+                >
+                  <p className="text-xs font-bold text-red-800">Proceed with Existing Retail Prices</p>
+                  <p className="text-[10px] text-red-600 mt-0.5">Complete purchase now. You may sell at a loss until prices are updated.</p>
+                </button>
+              </div>
+              <div className="pt-3 border-t border-slate-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsPriceWarningOpen(false)}
+                  className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-xs font-semibold"
+                >
+                  Cancel & Edit Purchase
                 </button>
               </div>
             </div>

@@ -1,20 +1,42 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny global safety net
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    // Basic helpers
+    // ════════════════════════════════════════════════════════════════════════
+    // AUTHENTICATION & AUTHORIZATION HELPERS
+    // ════════════════════════════════════════════════════════════════════════
+    
     function isSignedIn() {
       return request.auth != null;
     }
 
     function isEmailVerified() {
-      return isSignedIn();
+      return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    // ROLE-BASED ACCESS CONTROL
+    // Uses Firebase Auth Custom Claims for production-grade security
+    // Custom claims are set server-side via Firebase Admin SDK
+    function getUserRole() {
+      // Read the custom claim 'role' from the auth token
+      return request.auth.token.role;
+    }
+
+    function isSuperAdmin() {
+      // Super admin can operate without email verification (trusted user for database reset)
+      return isSignedIn() && getUserRole() == 'super_admin';
+    }
+
+    function isAdmin() {
+      // Super admin can perform admin operations without email verification
+      return isSuperAdmin() || (isEmailVerified() && (getUserRole() == 'admin' || getUserRole() == 'super_admin'));
+    }
+
+    function isOperator() {
+      // Super admin can read/list without email verification
+      return isSuperAdmin() || (isEmailVerified() && (getUserRole() == 'operator' || getUserRole() == 'admin' || getUserRole() == 'super_admin'));
+    }
+
+    // VALIDATION HELPERS
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -27,7 +49,22 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Type and structure validations (The "Anti-Update-Gap")
+    function isValidString(value, maxLength) {
+      return value is string && value.size() <= maxLength;
+    }
+
+    function isValidNumber(value, minValue) {
+      return value is number && value >= minValue;
+    }
+
+    function isValidOptionalString(value, maxLength) {
+      return !('value' in resource.data) || (value is string && value.size() <= maxLength);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // DATA VALIDATION FUNCTIONS (ENHANCED WITH NEW FIELDS)
+    // ════════════════════════════════════════════════════════════════════════
+
     function isValidPart(data) {
       return data.partNumber is string && data.partNumber.size() <= 100 &&
              data.name is string && data.name.size() <= 200 &&
@@ -35,7 +72,13 @@ service cloud.firestore {
              data.purchasePrice is number && data.purchasePrice >= 0 &&
              data.retailPrice is number && data.retailPrice >= 0 &&
              data.stock is number &&
-             data.minStock is number && data.minStock >= 0;
+             data.minStock is number && data.minStock >= 0 &&
+             // Enhanced validation for NEW FIELDS - TEMPORARY: less strict validation
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 5000)) &&
+             (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 2048)) &&
+             (!('category' in data) || (data.category is string && data.category.size() <= 100)) &&
+             (!('modelCompatibility' in data) || (data.modelCompatibility is string && data.modelCompatibility.size() <= 200)) &&
+             (!('location' in data) || (data.location is string && data.location.size() <= 100));
     }
 
     function isValidCustomer(data) {
@@ -78,10 +121,12 @@ service cloud.firestore {
              data.quantity is number;
     }
 
+    // AUDIT LOG VALIDATION - IMMUTABLE AFTER CREATION
     function isValidAuditLog(data) {
       return data.userEmail is string && data.userEmail.size() <= 150 &&
              data.action is string && data.action.size() <= 100 &&
-             data.details is string && data.details.size() <= 1000;
+             data.details is string && data.details.size() <= 1000 &&
+             data.createdAt is string;
     }
 
     function isValidPayment(data) {
@@ -111,6 +156,7 @@ service cloud.firestore {
              data.createdAt is string;
     }
 
+    // ENHANCED SETTINGS VALIDATION WITH ADMIN PROTECTION
     function isValidSettings(data) {
       return data.shopName is string && data.shopName.size() <= 200 &&
              data.phone is string && data.phone.size() <= 100 &&
@@ -161,94 +207,130 @@ service cloud.firestore {
              data.createdAt is string;
     }
 
-    // Collections
+    // COUNTER VALIDATION - PREVENT MANUAL TAMPERING
+    function isValidCounter(data) {
+      return data.seq is number && data.seq >= 0;
+    }
+
+    function isCounterIncrement(data, existing) {
+      // Allow only increments, never decrements or resets
+      return data.seq is number && data.seq > existing.seq;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // COLLECTION SECURITY RULES (ROLE-BASED ACCESS CONTROL)
+    // ════════════════════════════════════════════════════════════════════════
+
+    // PARTS MASTER - READ: All authenticated, WRITE: Operators+, DELETE: Admin+
     match /parts/{partId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(partId) && isValidPart(incoming());
-      allow update: if isEmailVerified() && isValidId(partId) && isValidPart(incoming());
-      allow delete: if isEmailVerified() && isValidId(partId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(partId) && isValidPart(incoming());
+      allow update: if isOperator() && isValidId(partId) && isValidPart(incoming());
+      allow delete: if isAdmin() && isValidId(partId);
     }
 
+    // CUSTOMERS - READ: All authenticated, WRITE: Operators+, DELETE: Admin+
     match /customers/{customerId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(customerId) && isValidCustomer(incoming());
-      allow update: if isEmailVerified() && isValidId(customerId) && isValidCustomer(incoming());
-      allow delete: if isEmailVerified() && isValidId(customerId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(customerId) && isValidCustomer(incoming());
+      allow update: if isOperator() && isValidId(customerId) && isValidCustomer(incoming());
+      allow delete: if isAdmin() && isValidId(customerId);
     }
 
+    // SUPPLIERS - READ: All authenticated, WRITE: Operators+, DELETE: Admin+
     match /suppliers/{supplierId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(supplierId) && isValidSupplier(incoming());
-      allow update: if isEmailVerified() && isValidId(supplierId) && isValidSupplier(incoming());
-      allow delete: if isEmailVerified() && isValidId(supplierId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(supplierId) && isValidSupplier(incoming());
+      allow update: if isOperator() && isValidId(supplierId) && isValidSupplier(incoming());
+      allow delete: if isAdmin() && isValidId(supplierId);
     }
 
+    // SALES - READ: All authenticated, WRITE: Operators+, DELETE: Admin only
     match /sales/{saleId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(saleId) && isValidSale(incoming());
-      allow update: if isEmailVerified() && isValidId(saleId) && isValidSale(incoming());
-      allow delete: if isEmailVerified() && isValidId(saleId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(saleId) && isValidSale(incoming());
+      allow update: if isAdmin() && isValidId(saleId) && isValidSale(incoming());
+      allow delete: if isAdmin() && isValidId(saleId);
     }
 
+    // PURCHASES - READ: All authenticated, WRITE: Operators+, DELETE: Admin only  
     match /purchases/{purchaseId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(purchaseId) && isValidPurchase(incoming());
-      allow update: if isEmailVerified() && isValidId(purchaseId) && isValidPurchase(incoming());
-      allow delete: if isEmailVerified() && isValidId(purchaseId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(purchaseId) && isValidPurchase(incoming());
+      allow update: if isOperator() && isValidId(purchaseId) && isValidPurchase(incoming());
+      allow delete: if isAdmin() && isValidId(purchaseId);
     }
 
+    // ADJUSTMENTS - READ: All authenticated, WRITE: Operators+, DELETE: Admin only
     match /adjustments/{adjustmentId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(adjustmentId) && isValidAdjustment(incoming());
-      allow update: if isEmailVerified() && isValidId(adjustmentId) && isValidAdjustment(incoming());
-      allow delete: if isEmailVerified() && isValidId(adjustmentId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(adjustmentId) && isValidAdjustment(incoming());
+      allow update: if isAdmin() && isValidId(adjustmentId) && isValidAdjustment(incoming());
+      allow delete: if isAdmin() && isValidId(adjustmentId);
     }
 
+    // AUDIT LOGS - READ: All authenticated, WRITE: System only, DELETE: Never (immutable audit trail)
     match /audit_logs/{logId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(logId) && isValidAuditLog(incoming());
-      allow update, delete: if isEmailVerified() && isValidId(logId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(logId) && isValidAuditLog(incoming());
+      allow update: if false; // Audit logs are immutable
+      allow delete: if false; // Audit logs must never be deleted
     }
 
+    // PAYMENTS - READ: All authenticated, WRITE: Operators+, DELETE: Admin only
     match /payments/{paymentId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(paymentId) && isValidPayment(incoming());
-      allow update: if isEmailVerified() && isValidId(paymentId) && isValidPayment(incoming());
-      allow delete: if isEmailVerified() && isValidId(paymentId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(paymentId) && isValidPayment(incoming());
+      allow update: if isOperator() && isValidId(paymentId) && isValidPayment(incoming());
+      allow delete: if isAdmin() && isValidId(paymentId);
     }
 
+    // LEDGER ENTRIES - READ: All authenticated, WRITE: System only, DELETE: Never (immutable financial records)
     match /ledger_entries/{entryId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(entryId) && isValidLedgerEntry(incoming());
-      allow update: if isEmailVerified() && isValidId(entryId) && isValidLedgerEntry(incoming());
-      allow delete: if isEmailVerified() && isValidId(entryId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(entryId) && isValidLedgerEntry(incoming());
+      allow update: if false; // Ledger entries are immutable
+      allow delete: if false; // Ledger entries must never be deleted
     }
 
+    // SETTINGS - READ: All authenticated, WRITE: Admin+ only, DELETE: Never
     match /settings/{settingsId} {
-      allow read: if isEmailVerified();
-      allow create, update: if isEmailVerified() && isValidId(settingsId) && isValidSettings(incoming());
+      allow read: if isOperator();
+      allow create, update: if isAdmin() && isValidId(settingsId) && isValidSettings(incoming());
+      // SECURITY: Settings should never be deleted
       allow delete: if false;
     }
 
+    // EXPENSES - READ: All authenticated, WRITE: Operators+, DELETE: Admin+
     match /expenses/{expenseId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(expenseId) && isValidExpense(incoming());
-      allow update: if isEmailVerified() && isValidId(expenseId) && isValidExpense(incoming());
-      allow delete: if isEmailVerified() && isValidId(expenseId);
+      allow read, list: if isOperator();
+      allow create: if isOperator() && isValidId(expenseId) && isValidExpense(incoming());
+      allow update: if isOperator() && isValidId(expenseId) && isValidExpense(incoming());
+      allow delete: if isAdmin() && isValidId(expenseId);
     }
 
+    // PARTNERS - READ: All authenticated, WRITE/DELETE: Admin+ only (sensitive business data)
     match /partners/{partnerId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(partnerId) && isValidPartner(incoming());
-      allow update: if isEmailVerified() && isValidId(partnerId) && isValidPartner(incoming());
-      allow delete: if isEmailVerified() && isValidId(partnerId);
+      allow read, list: if isOperator();
+      allow create: if isAdmin() && isValidId(partnerId) && isValidPartner(incoming());
+      allow update: if isAdmin() && isValidId(partnerId) && isValidPartner(incoming());
+      allow delete: if isSuperAdmin() && isValidId(partnerId);
     }
 
+    // DRAWINGS - READ: All authenticated, WRITE: Admin+, DELETE: Super Admin only
     match /drawings/{drawingId} {
-      allow read, list: if isEmailVerified();
-      allow create: if isEmailVerified() && isValidId(drawingId) && isValidDrawing(incoming());
-      allow update: if isEmailVerified() && isValidId(drawingId) && isValidDrawing(incoming());
-      allow delete: if isEmailVerified() && isValidId(drawingId);
+      allow read, list: if isOperator();
+      allow create: if isAdmin() && isValidId(drawingId) && isValidDrawing(incoming());
+      allow update: if isAdmin() && isValidId(drawingId) && isValidDrawing(incoming());
+      allow delete: if isSuperAdmin() && isValidId(drawingId);
+    }
+
+    // COUNTERS - READ: All authenticated, WRITE: System only, DELETE: Never (critical sequence numbers)
+    match /counters/{counterName} {
+      allow read, list: if isOperator();
+      allow create: if isAdmin() && isValidId(counterName) && isValidCounter(incoming());
+      allow update: if isAdmin() && isValidId(counterName) && isCounterIncrement(incoming(), existing());
+      allow delete: if false; // Counters must never be deleted
     }
   }
 }

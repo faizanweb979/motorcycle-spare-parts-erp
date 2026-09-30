@@ -32,6 +32,7 @@ export const Inventory: React.FC = () => {
   const [adjQty, setAdjQty] = useState(0);
   const [adjReason, setAdjReason] = useState('');
   const [formError, setFormError] = useState('');
+  const [isAdjSubmitting, setIsAdjSubmitting] = useState(false);
 
   // 1. DYNAMIC METRICS
   const stockMetrics = useMemo(() => {
@@ -75,6 +76,7 @@ export const Inventory: React.FC = () => {
   // Handle Adjustment submission
   const handleAdjustmentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAdjSubmitting) return; // double-submission guard
     setFormError('');
 
     if (!selectedPartId) {
@@ -95,11 +97,13 @@ export const Inventory: React.FC = () => {
     const selectedPart = parts.find(p => p.id === selectedPartId);
     if (!selectedPart) return;
 
+    // Client-side pre-check for subtraction (server will re-validate in transaction)
     if (adjType === 'adjustment_sub' && selectedPart.stock < adjQty) {
       setFormError(`Insufficient stock! Cannot deduct ${adjQty} units from current stock of ${selectedPart.stock}.`);
       return;
     }
 
+    setIsAdjSubmitting(true);
     try {
       await addAdjustment({
         partId: selectedPart.id,
@@ -118,6 +122,8 @@ export const Inventory: React.FC = () => {
       setAdjReason('');
     } catch (err: any) {
       setFormError(err.message || 'Operation failed.');
+    } finally {
+      setIsAdjSubmitting(false);
     }
   };
 
@@ -423,9 +429,10 @@ export const Inventory: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs transition-colors shadow-xs"
+                  disabled={isAdjSubmitting}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold rounded-lg text-xs transition-colors shadow-xs"
                 >
-                  Apply Correction
+                  {isAdjSubmitting ? 'Processing...' : 'Apply Correction'}
                 </button>
               </div>
             </form>

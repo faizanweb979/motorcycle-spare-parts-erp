@@ -25,7 +25,8 @@ import {
 } from 'lucide-react';
 import { useERP } from '../context/ERPContext';
 import { collection, doc, writeBatch, setDoc, deleteDoc, getDocs } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { db, auth, logoutUser } from '../firebase';
+import { DEFAULT_CATEGORY } from '../constants/categories';
 
 export const Settings: React.FC = () => {
   const { 
@@ -70,24 +71,34 @@ export const Settings: React.FC = () => {
     setStartingBank(settings.startingBank !== undefined ? settings.startingBank : 150000);
   }, [settings]);
 
-  // ROLE-BASED ACCESS CONTROL (SIMULATOR FOR VERIFICATION & PRODUCTION DEMOS)
-  const [simulatedRole, setSimulatedRole] = useState<'super_admin' | 'admin' | 'operator'>(() => {
-    const saved = localStorage.getItem('simulated_role');
-    if (saved) return saved as any;
-    const email = auth.currentUser?.email || '';
-    if (email.includes('admin') || email.includes('owner') || email.includes('super')) return 'super_admin';
-    if (email.includes('operator')) return 'operator';
-    return 'super_admin'; // Default to Super Admin for easy full-feature testing in AI Studio
-  });
+  // ROLE-BASED ACCESS CONTROL (ALIGNED WITH FIRESTORE RULES)
+  // Uses Firebase Auth Custom Claims for production-grade security
+  const [userRole, setUserRole] = useState<'super_admin' | 'admin' | 'operator' | null>(null);
 
-  const handleRoleChange = (role: 'super_admin' | 'admin' | 'operator') => {
-    setSimulatedRole(role);
-    localStorage.setItem('simulated_role', role);
-  };
+  // Get role from ID token custom claims
+  useEffect(() => {
+    const fetchUserRole = async () => {
+      if (auth.currentUser) {
+        try {
+          // Force token refresh to get latest custom claims
+          await auth.currentUser.getIdToken(true);
+          const idTokenResult = await auth.currentUser.getIdTokenResult();
+          const role = idTokenResult.claims.role as 'super_admin' | 'admin' | 'operator' | undefined;
+          
+          setUserRole(role || 'operator'); // Default to operator if no claim set
+        } catch (error) {
+          console.error('Error fetching user role:', error);
+          setUserRole('operator'); // Fallback to operator on error
+        }
+      }
+    };
+
+    fetchUserRole();
+  }, [auth.currentUser]);
 
   // CHECK PERMISSIONS
-  const isSuperAdmin = simulatedRole === 'super_admin';
-  const isAdminOrSuper = simulatedRole === 'admin' || simulatedRole === 'super_admin';
+  const isSuperAdmin = userRole === 'super_admin';
+  const isAdminOrSuper = userRole === 'admin' || userRole === 'super_admin';
 
   // DATABASE OPERATIONS STATE
   const [exportCollection, setExportCollection] = useState('parts');
@@ -125,6 +136,11 @@ export const Settings: React.FC = () => {
   // DANGER ZONE NOTIFICATIONS STATE
   const [dangerSuccess, setDangerSuccess] = useState<string | null>(null);
   const [dangerError, setDangerError] = useState<string | null>(null);
+
+  // CLEAR ALL DATA CONFIRMATION STATE
+  const [showClearDataModal, setShowClearDataModal] = useState(false);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
+  const [isClearingData, setIsClearingData] = useState(false);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -180,24 +196,47 @@ export const Settings: React.FC = () => {
     }
     setDangerSuccess(null);
     setDangerError(null);
+    setShowClearDataModal(true);
+    setDeleteConfirmationText('');
+  };
 
-    const confirmClear = confirm('This action cannot be undone. Are you sure?');
-    if (confirmClear) {
-      const doubleCheck = prompt('Type "WIPE" to confirm permanent deletion of all system records:');
-      if (doubleCheck === 'WIPE') {
-        try {
-          setSaving(true);
-          await clearAllData();
-          setDangerSuccess('🔴 Success: Database successfully wiped and reset to empty factory state.');
-          await addManualAuditLog('WIPE_DATABASE', 'Super Admin triggered complete database wipe & factory reset.');
-        } catch (err: any) {
-          setDangerError(`Error wiping database: ${err.message}`);
-        } finally {
-          setSaving(false);
-        }
-      } else {
-        setDangerError('Database reset cancelled: Confirmation phrase did not match.');
+  const executeClearAllData = async () => {
+    // Second confirmation before execution
+    const finalConfirm = confirm('FINAL WARNING: This will permanently delete ALL data. This action cannot be undone. Are you absolutely sure you want to proceed?');
+    if (!finalConfirm) {
+      return;
+    }
+
+    setIsClearingData(true);
+    setShowClearDataModal(false);
+    setDeleteConfirmationText('');
+
+    try {
+      // Force token refresh to get latest custom claims and permissions
+      if (auth.currentUser) {
+        await auth.currentUser.getIdToken(true);
+        console.log('🔄 Token refreshed for database reset');
       }
+      
+      await clearAllData();
+      setDangerSuccess('🔴 Success: Database successfully wiped and reset to empty factory state.');
+      await addManualAuditLog('WIPE_DATABASE', 'Super Admin triggered complete database wipe & factory reset.');
+      
+      // Sign out to clear Firebase auth state and all caches
+      await logoutUser();
+      
+      // Clear ALL storage immediately
+      localStorage.clear();
+      sessionStorage.clear();
+      
+      // Force hard reload with cache busting
+      setTimeout(() => {
+        window.location.reload();
+      }, 500);
+    } catch (err: any) {
+      setDangerError(`Error wiping database: ${err.message}`);
+    } finally {
+      setIsClearingData(false);
     }
   };
 
@@ -635,7 +674,7 @@ export const Settings: React.FC = () => {
           const partNumber = partNoIdx !== -1 && row[partNoIdx] ? row[partNoIdx].replace(/"/g, '') : `PART-${Math.floor(100000 + Math.random() * 900000)}`;
           const name = row[nameIdx].replace(/"/g, '');
           const brand = brandIdx !== -1 ? row[brandIdx].replace(/"/g, '') : 'Generic';
-          const category = catIdx !== -1 ? row[catIdx].replace(/"/g, '') : 'Miscellaneous';
+          const category = catIdx !== -1 ? row[catIdx].replace(/"/g, '') : DEFAULT_CATEGORY;
           const modelCompatibility = modelIdx !== -1 ? row[modelIdx].replace(/"/g, '') : 'Universal';
           const location = locIdx !== -1 ? row[locIdx].replace(/"/g, '') : 'General Shelf';
           const purchasePrice = pPriceIdx !== -1 ? Number(row[pPriceIdx].replace(/"/g, '')) || 0 : 0;
@@ -1026,7 +1065,7 @@ export const Settings: React.FC = () => {
             batch.update(partRef, {
               partNumber: part.partNumber || `PART-${Math.floor(100000 + Math.random() * 900000)}`,
               brand: part.brand || 'Generic',
-              category: part.category || 'Miscellaneous',
+              category: part.category || DEFAULT_CATEGORY,
               updatedAt: new Date().toISOString()
             });
             correctedCount++;
@@ -1154,18 +1193,16 @@ export const Settings: React.FC = () => {
           <p className="text-[11px] text-slate-400 font-mono mt-0.5">Manage store metadata, thermal invoice footers, and execute system maintenance logs.</p>
         </div>
 
-        {/* ROLE SIMULATOR (VERIFICATION TOOL FOR REVIEWERS) */}
+        {/* CURRENT ROLE DISPLAY (READ-ONLY FROM CUSTOM CLAIMS) */}
         <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg shrink-0">
-          <span className="text-[10px] font-bold text-slate-500 font-mono tracking-wider uppercase">Active Role:</span>
-          <select 
-            value={simulatedRole}
-            onChange={(e) => handleRoleChange(e.target.value as any)}
-            className="text-[11px] font-bold bg-white border border-slate-200 text-slate-700 px-2.5 py-1 rounded-md focus:outline-hidden cursor-pointer"
-          >
-            <option value="super_admin">⚡ Super Admin (Full Access)</option>
-            <option value="admin">💼 Admin (Write/No Destructive)</option>
-            <option value="operator">🛠️ Operator (Read/No Write)</option>
-          </select>
+          <span className="text-[10px] font-bold text-slate-500 font-mono tracking-wider uppercase">Your Role:</span>
+          <span className={`text-[11px] font-bold px-2.5 py-1 rounded-md ${
+            userRole === 'super_admin' ? 'bg-purple-100 text-purple-700' :
+            userRole === 'admin' ? 'bg-blue-100 text-blue-700' :
+            'bg-slate-100 text-slate-700'
+          }`}>
+            {userRole === 'super_admin' ? '⚡ Super Admin' : userRole === 'admin' ? '💼 Admin' : '🛠️ Operator'}
+          </span>
         </div>
       </div>
 
@@ -1597,11 +1634,11 @@ export const Settings: React.FC = () => {
                   </button>
                   <button
                     onClick={handleClearAllData}
-                    disabled={saving}
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer"
+                    disabled={saving || isClearingData}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Trash2 className="h-3.5 w-3.5 text-red-500" />
-                    <span>Reset Database to Empty</span>
+                    <span>{isClearingData ? 'Clearing...' : 'Reset Database to Empty'}</span>
                   </button>
                 </div>
               ) : (
@@ -1642,6 +1679,87 @@ export const Settings: React.FC = () => {
         </div>
 
       </div>
+
+      {/* CLEAR ALL DATA CONFIRMATION MODAL */}
+      {showClearDataModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-red-200 max-w-lg w-full overflow-hidden">
+            <div className="p-6 border-b border-red-100 bg-red-50/50">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-100 rounded-lg">
+                  <AlertTriangle className="h-6 w-6 text-red-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-red-900">⚠️ PERMANENT DATA DESTRUCTION</h3>
+                  <p className="text-xs text-red-700 font-semibold">This action cannot be undone</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <p className="text-sm font-bold text-red-900 mb-2">This will permanently delete ALL data:</p>
+                <ul className="text-xs text-red-800 space-y-1 font-mono">
+                  <li>• All Parts inventory</li>
+                  <li>• All Customers and Suppliers</li>
+                  <li>• All Sales transactions</li>
+                  <li>• All Purchase records</li>
+                  <li>• All Payments and Ledger entries</li>
+                  <li>• All Expenses</li>
+                  <li>• All Partners and Drawings</li>
+                  <li>• All Stock Adjustments</li>
+                  <li>• All Audit Logs</li>
+                  <li>• Shop Settings (will be reset to defaults)</li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Type <span className="text-red-600 font-mono font-black">DELETE</span> to confirm
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmationText}
+                  onChange={(e) => setDeleteConfirmationText(e.target.value)}
+                  placeholder="Type DELETE exactly"
+                  className="w-full border-2 border-red-200 rounded-lg px-4 py-3 text-sm font-mono font-bold focus:outline-hidden focus:border-red-500 focus:ring-2 focus:ring-red-200"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowClearDataModal(false);
+                  setDeleteConfirmationText('');
+                }}
+                disabled={isClearingData}
+                className="px-4 py-2.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeClearAllData}
+                disabled={deleteConfirmationText !== 'DELETE' || isClearingData}
+                className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {isClearingData ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4" />
+                    <span>Delete All Data</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

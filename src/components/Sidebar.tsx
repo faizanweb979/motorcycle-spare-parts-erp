@@ -51,10 +51,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, userE
     <div className="w-64 bg-[#1E293B] text-slate-100 flex flex-col h-screen fixed left-0 top-0 z-20 border-r border-slate-800">
       {/* Brand Header */}
       <div className="p-6 border-b border-slate-800 flex items-center gap-3 bg-slate-900/60">
-        <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold shadow-md shadow-blue-600/20">M</div>
+        <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold shadow-md shadow-blue-600/20">B</div>
         <div>
           <span className="text-white font-semibold text-base tracking-tight uppercase block">MotoPart ERP</span>
-          <p className="text-[9px] text-slate-400 uppercase tracking-widest font-mono -mt-0.5">Bismillah Autos</p>
+          <p className="text-[9px] text-slate-400 uppercase tracking-widest font-mono -mt-0.5">BIN ADAM TRADERS</p>
         </div>
       </div>
 

@@ -2,12 +2,22 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Rate limiting for AI chat endpoint to prevent abuse and cost overrun
+  const aiChatLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 30, // Limit each IP to 30 requests per windowMs
+    message: { error: "Too many AI chat requests. Please try again later." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   app.use(express.json({ limit: "15mb" }));
 
@@ -16,8 +26,8 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  // AI Chat endpoint
-  app.post("/api/ai/chat", async (req, res) => {
+  // AI Chat endpoint with rate limiting
+  app.post("/api/ai/chat", aiChatLimiter, async (req, res) => {
     const { prompt, chatHistory, businessContext } = req.body;
 
     const groqApiKey = process.env.GROQ_API_KEY;
@@ -27,7 +37,7 @@ async function startServer() {
     let providerUsed: "groq" | "gemini" = "gemini";
 
     const systemInstruction = `
-You are the dedicated AI Assistant for "MotoPart ERP" (Bismillah Autos & Spare Parts, McLeod Road, Lahore, Pakistan).
+You are the dedicated AI Assistant for "MotoPart ERP" (BIN ADAM TRADERS, McLeod Road, Lahore, Pakistan).
 Your goal is to provide deep, actionable business insights, financial analyses, and inventory advice based on the real-time ERP data provided to you.
 
 Guidelines:
@@ -44,7 +54,7 @@ Guidelines:
     const contextPrompt = `
 [REAL-TIME ERP BUSINESS DATA CONTEXT]
 Currency: ${currencySymbol}
-Shop Name: ${(businessContext && businessContext.shopName) || "Bismillah Autos"}
+Shop Name: ${(businessContext && businessContext.shopName) || "BIN ADAM TRADERS"}
 Starting Cash: ${currencySymbol} ${((businessContext && businessContext.startingCash) || 0).toLocaleString()}
 Starting Bank: ${currencySymbol} ${((businessContext && businessContext.startingBank) || 0).toLocaleString()}
 
@@ -104,7 +114,7 @@ Yearly Net Profit: ${currencySymbol} ${((businessContext && businessContext.netP
           });
           groqMessages.push({
             role: "assistant",
-            content: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "Bismillah Autos"}. I am ready to provide business analysis and answer questions based on this data. What would you like to know?`
+            content: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "BIN ADAM TRADERS"}. I am ready to provide business analysis and answer questions based on this data. What would you like to know?`
           });
           chatHistory.forEach((msg: any) => {
             groqMessages.push({
@@ -187,7 +197,7 @@ Yearly Net Profit: ${currencySymbol} ${((businessContext && businessContext.netP
           });
           contents.push({
             role: "model",
-            parts: [{ text: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "Bismillah Autos"}. I am ready to provide business analysis and answer questions based on this data. What would you like to know?` }]
+            parts: [{ text: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "BIN ADAM TRADERS"}. I am ready to provide business analysis and answer questions based on this data. What would you like to know?` }]
           });
 
           chatHistory.forEach((msg: any) => {

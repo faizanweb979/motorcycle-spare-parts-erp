@@ -14,7 +14,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const systemInstruction = `
-You are the dedicated AI Assistant for "MotoPart ERP" (Bismillah Autos & Spare Parts, McLeod Road, Lahore, Pakistan).
+You are the dedicated AI Assistant for "MotoPart ERP" (BIN ADAM TRADERS, McLeod Road, Lahore, Pakistan).
 Your goal is to provide deep, actionable business insights, financial analyses, and inventory advice based on the real-time ERP data provided to you.
 
 Guidelines:
@@ -31,7 +31,7 @@ Guidelines:
   const contextPrompt = `
 [REAL-TIME ERP BUSINESS DATA CONTEXT]
 Currency: ${currencySymbol}
-Shop Name: ${(businessContext && businessContext.shopName) || "Bismillah Autos"}
+Shop Name: ${(businessContext && businessContext.shopName) || "BIN ADAM TRADERS"}
 Starting Cash: ${currencySymbol} ${((businessContext && businessContext.startingCash) || 0).toLocaleString()}
 Starting Bank: ${currencySymbol} ${((businessContext && businessContext.startingBank) || 0).toLocaleString()}
 
@@ -77,7 +77,7 @@ Yearly Net Profit: ${currencySymbol} ${((businessContext && businessContext.netP
       });
       groqMessages.push({
         role: "assistant",
-        content: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "Bismillah Autos"}. What would you like to know?`
+        content: `Understood! I have loaded the real-time business data for ${(businessContext && businessContext.shopName) || "BIN ADAM TRADERS"}. What would you like to know?`
       });
       chatHistory.forEach((msg: any) => {
         groqMessages.push({

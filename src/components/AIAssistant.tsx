@@ -37,11 +37,15 @@ export const AIAssistant: React.FC = () => {
     settings 
   } = useERP();
 
-  // Role verification (from settings / localStorage / firebase email)
+  // Role verification (aligned with Firestore rules)
   const simulatedRole = useMemo(() => {
     const saved = localStorage.getItem("simulated_role");
     if (saved) return saved as "super_admin" | "admin" | "operator";
     const email = auth.currentUser?.email || "";
+    
+    // Match Firestore rules role detection logic
+    if (['admin@binadamtraders.com', 'owner@binadamtraders.com'].includes(email)) return "super_admin";
+    if (['manager@binadamtraders.com', 'accounts@binadamtraders.com'].includes(email)) return "admin";
     if (email.includes("admin") || email.includes("owner") || email.includes("super")) return "super_admin";
     if (email.includes("operator")) return "operator";
     return "super_admin"; // Default to Super Admin for easy workspace testing
@@ -188,7 +192,7 @@ export const AIAssistant: React.FC = () => {
     const yearlyNetProfit = yearlyGrossProfit - yearlyExpensesAmount;
 
     return {
-      shopName: settings?.shopName || "Bismillah Autos",
+      shopName: settings?.shopName || "BIN ADAM TRADERS",
       currency: settings?.currency || "Rs.",
       startingCash: settings?.startingCash !== undefined ? Number(settings.startingCash) : 50000,
       startingBank: settings?.startingBank !== undefined ? Number(settings.startingBank) : 150000,

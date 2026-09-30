@@ -128,13 +128,25 @@ export const Partners: React.FC = () => {
     const ownershipNum = Number(partnerOwnership);
     const investmentNum = Number(partnerInvestment);
 
+    // Validate ownership percentage is numeric and within valid range
+    if (isNaN(ownershipNum) || ownershipNum < 0 || ownershipNum > 100) {
+      alert('Ownership percentage must be a number between 0 and 100.');
+      return;
+    }
+
+    // Validate investment is numeric and non-negative
+    if (isNaN(investmentNum) || investmentNum < 0) {
+      alert('Investment amount must be a non-negative number.');
+      return;
+    }
+
     // Validate ownership totals
     const existingOwnershipSum = partners
       .filter(p => p.id !== editingPartnerId)
       .reduce((sum, p) => sum + p.ownershipPercentage, 0);
     
     if (existingOwnershipSum + ownershipNum > 100) {
-      alert(`Invalid Ownership Percentage! Total ownership cannot exceed 100%. Currently allocated: ${existingOwnershipSum}%, attempting to allocate: ${ownershipNum}%, which sums to ${existingOwnershipSum + ownershipNum}%`);
+      alert('Total partner ownership cannot exceed 100%.');
       return;
     }
 

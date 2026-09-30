@@ -1,28 +1,56 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, enableMultiTabIndexedDbPersistence, enableIndexedDbPersistence } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const storage = getStorage(app);
 
-// Enable Firestore Offline Persistence
-enableMultiTabIndexedDbPersistence(db)
-  .catch((err) => {
-    if (err.code === 'failed-precondition') {
-      // Multiple tabs open, fallback to single tab persistence
-      console.warn('Multi-tab persistence failed-precondition, falling back to single-tab...');
-      enableIndexedDbPersistence(db).catch((singleErr) => {
-        console.warn('Firestore single-tab persistence also failed: ', singleErr);
-      });
-    } else if (err.code === 'unimplemented') {
-      // The current browser does not support all of the features required to enable persistence
-      console.warn('Firestore persistence unimplemented in this browser environment.');
-    } else {
-      console.warn('Firestore persistence setup failed: ', err);
-    }
-  });
+console.log('🔧 Firebase Configuration Loaded:');
+console.log('  Project ID:', firebaseConfig.projectId);
+console.log('  Storage Bucket:', firebaseConfig.storageBucket);
+console.log('  Auth Domain:', firebaseConfig.authDomain);
+console.log('  Current URL:', window.location.origin);
+
+// ⚠️ LOCALHOST DEVELOPMENT NOTE:
+// If you see CORS errors:
+// 1. Go to Firebase Console: https://console.firebase.google.com
+// 2. Select your project
+// 3. Go to Storage → Rules
+// 4. Update rules to allow localhost (see storage.rules)
+// 5. Also go to Authentication → Settings → Authorized domains
+// 6. Add "localhost" to authorized domains
+// 7. Refresh the page
+
+// Check if database was recently reset - if so, skip persistence
+const wasReset = localStorage.getItem('database_reset_timestamp');
+const resetTime = wasReset ? parseInt(wasReset) : 0;
+const isRecentReset = Date.now() - resetTime < 30000; // Within 30 seconds
+
+if (isRecentReset) {
+  console.log('🔄 Database recently reset - skipping offline persistence');
+  localStorage.removeItem('database_reset_timestamp');
+} else {
+  // Enable Firestore Offline Persistence
+  enableMultiTabIndexedDbPersistence(db)
+    .catch((err) => {
+      if (err.code === 'failed-precondition') {
+        // Multiple tabs open, fallback to single tab persistence
+        console.warn('Multi-tab persistence failed-precondition, falling back to single-tab...');
+        enableIndexedDbPersistence(db).catch((singleErr) => {
+          console.warn('Firestore single-tab persistence also failed: ', singleErr);
+        });
+      } else if (err.code === 'unimplemented') {
+        // The current browser does not support all of the features required to enable persistence
+        console.warn('Firestore persistence unimplemented in this browser environment.');
+      } else {
+        console.warn('Firestore persistence setup failed: ', err);
+      }
+    });
+}
 
 export const googleProvider = new GoogleAuthProvider();
 

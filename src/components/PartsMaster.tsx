@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   Plus, 
   Search, 
@@ -13,10 +14,13 @@ import {
   MapPin, 
   Info,
   Calendar,
-  AlertTriangle
+  AlertTriangle,
+  Image as ImageIcon
 } from 'lucide-react';
 import { useERP } from '../context/ERPContext';
 import { Part } from '../types';
+import { PART_CATEGORIES, DEFAULT_CATEGORY, getCategoryPlaceholder } from '../constants/categories';
+import { compressImage } from '../utils/imageCompressor';
 
 interface PartsMasterProps {
   selectedPartId: string | null;
@@ -32,6 +36,8 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
   setShowAddFormGlobally
 }) => {
   const { parts, addPart, updatePart, deletePart, settings } = useERP();
+  const navigate = useNavigate();
+  const modalFileInputRef = useRef<HTMLInputElement>(null);
 
   // Search & Filter state
   const [search, setSearch] = useState('');
@@ -54,6 +60,8 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
   const [retailPrice, setRetailPrice] = useState(0);
   const [stock, setStock] = useState(0);
   const [minStock, setMinStock] = useState(5);
+  const [imageUrl, setImageUrl] = useState('');
+  const [isUploadingModalImage, setIsUploadingModalImage] = useState(false);
 
   const [formError, setFormError] = useState('');
 
@@ -81,6 +89,7 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
   // Filters logic
   const filteredParts = useMemo(() => {
     return parts.filter(p => {
+      if (p.isArchived) return false;
       const matchesSearch = 
         p.name.toLowerCase().includes(search.toLowerCase()) || 
         p.partNumber.toLowerCase().includes(search.toLowerCase()) || 
@@ -105,13 +114,14 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
     setPartNumber('');
     setName('');
     setBrand('');
-    setCategory('Engine Parts');
+    setCategory(DEFAULT_CATEGORY);
     setModelCompatibility('');
     setLocation('');
     setPurchasePrice(0);
     setRetailPrice(0);
     setStock(0);
     setMinStock(5);
+    setImageUrl('');
     setFormError('');
     setIsFormOpen(true);
   };
@@ -128,8 +138,24 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
     setRetailPrice(part.retailPrice);
     setStock(part.stock);
     setMinStock(part.minStock);
+    setImageUrl(part.imageUrl || '');
     setFormError('');
     setIsFormOpen(true);
+  };
+
+  const handleModalImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setIsUploadingModalImage(true);
+      const compressed = await compressImage(file, 700, 0.75);
+      setImageUrl(compressed.dataUrl);
+    } catch (err: any) {
+      setFormError('تصویر کمپریس کرنے میں مسئلہ: ' + (err.message || 'Error'));
+    } finally {
+      setIsUploadingModalImage(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -149,8 +175,7 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
     try {
       if (editingPart) {
         // Edit Part
-        await updatePart(editingPart.id, {
-          partNumber,
+        const updateData: any = {
           name,
           brand,
           category,
@@ -160,10 +185,14 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
           retailPrice,
           stock,
           minStock
-        });
+        };
+        if (imageUrl.trim()) {
+          updateData.imageUrl = imageUrl.trim();
+        }
+        await updatePart(editingPart.id, updateData);
       } else {
         // Add Part
-        await addPart({
+        const newPartData: any = {
           partNumber,
           name,
           brand,
@@ -174,7 +203,11 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
           retailPrice,
           stock,
           minStock
-        });
+        };
+        if (imageUrl.trim()) {
+          newPartData.imageUrl = imageUrl.trim();
+        }
+        await addPart(newPartData);
       }
       setIsFormOpen(false);
     } catch (err: any) {
@@ -186,7 +219,9 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
     if (confirm('Are you absolutely sure you want to delete this spare part from the database? This cannot be undone.')) {
       try {
         await deletePart(id);
-        if (selectedPartId === id) setSelectedPartId(null);
+        if (selectedPartId === id) {
+          setSelectedPartId(null);
+        }
       } catch (err) {
         alert('Failed to delete item.');
       }
@@ -212,7 +247,7 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* 1. Header Toolbar */}
+          {/* 1. Header Toolbar */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
         <div className="flex flex-col gap-0.5">
           <h1 className="text-base font-bold text-slate-800">Parts Registry (Catalog)</h1>
@@ -312,12 +347,26 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
                         className={`hover:bg-slate-50/50 cursor-pointer transition-colors ${
                           isSelected ? 'bg-blue-50/30' : ''
                         }`}
-                        onClick={() => setSelectedPartId(p.id)}
+                        onClick={() => {
+                          setSelectedPartId(p.id);
+                          navigate(`/parts/${p.id}`);
+                        }}
                       >
                         <td className="py-3.5 px-4 font-mono text-[11px] font-bold text-slate-900">{p.partNumber}</td>
                         <td className="py-3.5 px-4">
-                          <p className="font-bold text-slate-800">{p.name}</p>
-                          <span className="text-[10px] text-slate-400 font-medium">{p.category}</span>
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-100 flex items-center justify-center overflow-hidden shrink-0">
+                              {p.imageUrl ? (
+                                <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <ImageIcon className="h-4 w-4 text-slate-400" />
+                              )}
+                            </div>
+                            <div>
+                              <p className="font-bold text-slate-800">{p.name}</p>
+                              <span className="text-[10px] text-slate-400 font-medium">{p.category}</span>
+                            </div>
+                          </div>
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-slate-600">{p.brand}</td>
                         <td className="py-3.5 px-4 font-mono text-[11px]">{p.modelCompatibility || 'Universal'}</td>
@@ -380,6 +429,11 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
             </div>
           ) : (
             <div className="space-y-4">
+              {activeDetailPart.imageUrl && (
+                <div className="w-full h-36 bg-slate-100 rounded-lg overflow-hidden border border-slate-200">
+                  <img src={activeDetailPart.imageUrl} alt={activeDetailPart.name} className="w-full h-full object-cover" />
+                </div>
+              )}
               <div>
                 <span className="text-[9px] bg-blue-50 text-blue-800 font-bold px-2 py-0.5 rounded uppercase">{activeDetailPart.category}</span>
                 <h4 className="text-sm font-black text-slate-800 mt-1.5">{activeDetailPart.name}</h4>
@@ -460,6 +514,50 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
               )}
 
               <div className="grid grid-cols-2 gap-3">
+                {/* Part Image Selector */}
+                <div className="space-y-1 col-span-2">
+                  <label className="text-xs font-semibold text-slate-600 block">Part Image (Optional)</label>
+                  <div className="flex items-center gap-3">
+                    <div className="w-14 h-14 rounded-lg border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                      {imageUrl ? (
+                        <img src={imageUrl} alt="Part Preview" className="w-full h-full object-cover" />
+                      ) : (
+                        <ImageIcon className="h-6 w-6 text-slate-300" />
+                      )}
+                    </div>
+                    <div className="flex-1 space-y-1">
+                      <input
+                        ref={modalFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={handleModalImageUpload}
+                        className="hidden"
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => modalFileInputRef.current?.click()}
+                          disabled={isUploadingModalImage}
+                          className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          <span>{isUploadingModalImage ? 'پروسیس ہو رہی ہے...' : imageUrl ? 'تصویر تبدیل کریں' : 'تصویر اپ لوڈ کریں'}</span>
+                        </button>
+                        {imageUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setImageUrl('')}
+                            className="px-2 py-1.5 text-xs text-red-600 hover:text-red-700 font-medium"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-400">کمپریشن کے ساتھ خودکار سیو ہو گی</p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="space-y-1 col-span-2">
                   <label className="text-xs font-semibold text-slate-600 block">Part Name / Description *</label>
                   <input
@@ -467,7 +565,7 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g., CD70 Cylinder Head Block Set"
+                    placeholder={getCategoryPlaceholder(category)}
                     className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-hidden focus:border-blue-500"
                   />
                 </div>
@@ -503,15 +601,9 @@ export const PartsMaster: React.FC<PartsMasterProps> = ({
                     onChange={(e) => setCategory(e.target.value)}
                     className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-hidden focus:border-blue-500"
                   >
-                    <option value="Engine Parts">Engine Parts</option>
-                    <option value="Clutch & Transmission">Clutch & Transmission</option>
-                    <option value="Chains & Gears">Chains & Gears</option>
-                    <option value="Lubricants & Oils">Lubricants & Oils</option>
-                    <option value="Electrical & Ignition">Electrical & Ignition</option>
-                    <option value="Brakes">Brakes</option>
-                    <option value="Cables & Controls">Cables & Controls</option>
-                    <option value="Filters">Filters</option>
-                    <option value="Body Parts">Body Parts</option>
+                    {PART_CATEGORIES.map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
                   </select>
                 </div>
 
